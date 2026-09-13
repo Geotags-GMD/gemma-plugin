@@ -108,11 +108,36 @@ jobs:
           echo "| **Triggered by** | ${{ github.actor }} |" >> "$GITHUB_STEP_SUMMARY"
           echo "| **Trigger stable release** | ${{ inputs.trigger_stable_release }} |" >> "$GITHUB_STEP_SUMMARY"
 
-      # ── 7. Optionally trigger stable release ────────────────────────
+      # ── 7. Validate dispatch token ─────────────────────────────────
+      #   GITHUB_TOKEN cannot trigger workflow_dispatch events (GitHub
+      #   blocks this to prevent recursive workflow runs). We must use
+      #   either the GitHub App bot token or a PAT (AI_TOKEN).
+      - name: Validate dispatch token
+        if: inputs.trigger_stable_release == true && success()
+        id: dispatch-token
+        run: |
+          if [ -n "$BOT_TOKEN" ]; then
+            echo "✅ Using GitHub App bot token for dispatch"
+            echo "token=$BOT_TOKEN" >> "$GITHUB_OUTPUT"
+          elif [ -n "$AI_TOKEN" ]; then
+            echo "✅ Using AI_TOKEN (PAT) for dispatch"
+            echo "token=$AI_TOKEN" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::No valid token available to trigger workflow_dispatch."
+            echo "::error::GITHUB_TOKEN cannot trigger workflow_dispatch events."
+            echo "::error::Ensure BOT_APP_ID + BOT_PRIVATE_KEY secrets are configured,"
+            echo "::error::or provide an AI_TOKEN PAT with 'actions:write' scope."
+            exit 1
+          fi
+        env:
+          BOT_TOKEN: ${{ steps.generate-token.outputs.token }}
+          AI_TOKEN: ${{ secrets.AI_TOKEN }}
+
+      # ── 8. Optionally trigger stable release ────────────────────────
       - name: Trigger stable release
         if: inputs.trigger_stable_release == true && success()
         env:
-          GH_TOKEN: ${{ steps.generate-token.outputs.token || secrets.AI_TOKEN || secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ steps.dispatch-token.outputs.token }}
         run: |
           echo "🚀 Triggering Release Gemma Plugin (Stable) workflow on main..."
           gh workflow run release-stable.yml \
@@ -120,4 +145,5 @@ jobs:
             -f bump_type="${{ inputs.bump_type }}" \
             -f custom_version=""
           echo "✅ Successfully triggered Release Gemma Plugin (Stable) workflow"
+
 
