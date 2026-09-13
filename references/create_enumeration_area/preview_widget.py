@@ -90,8 +90,11 @@ class TablePreviewWidgetWrapper(WidgetWrapper):
         self.delineation_table.setHorizontalHeaderLabels([
             "Geocode", "Barangay", "EA Name", "Household Count"
         ])
-        self.delineation_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.delineation_table.horizontalHeader().setStretchLastSection(True)
+        delin_hdr = self.delineation_table.horizontalHeader()
+        delin_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        delin_hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        delin_hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        delin_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.delineation_table.verticalHeader().setVisible(False)
         self.delineation_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.delineation_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -105,8 +108,11 @@ class TablePreviewWidgetWrapper(WidgetWrapper):
         self.merge_table.setHorizontalHeaderLabels([
             "Geocode", "Barangay", "EA Name", "Household Count"
         ])
-        self.merge_table.horizontalHeader().setSectionResizeMode(QHeaderView.Interactive)
-        self.merge_table.horizontalHeader().setStretchLastSection(True)
+        merge_hdr = self.merge_table.horizontalHeader()
+        merge_hdr.setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        merge_hdr.setSectionResizeMode(1, QHeaderView.Stretch)
+        merge_hdr.setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        merge_hdr.setSectionResizeMode(3, QHeaderView.ResizeToContents)
         self.merge_table.verticalHeader().setVisible(False)
         self.merge_table.setEditTriggers(QTableWidget.NoEditTriggers)
         self.merge_table.setSelectionBehavior(QTableWidget.SelectRows)
@@ -324,12 +330,14 @@ class TablePreviewWidgetWrapper(WidgetWrapper):
 
         fields = prev_ea_layer.fields()
         
-        # Resolve household field index case-insensitively
+        # Resolve household field index case-insensitively with hh_count taking priority
         hh_idx = -1
-        for i in range(fields.count()):
-            name_lower = fields.at(i).name().lower()
-            if name_lower in ["new_hhcount", "hhcount", "hh_count", "household", "household_count"]:
-                hh_idx = i
+        for candidate in ["hh_count", "new_hhcount", "hhcount", "household", "household_count", "pop", "population"]:
+            for i in range(fields.count()):
+                if fields.at(i).name().lower() == candidate:
+                    hh_idx = i
+                    break
+            if hh_idx != -1:
                 break
                 
         # Resolve EA ID field index case-insensitively
@@ -398,12 +406,13 @@ class TablePreviewWidgetWrapper(WidgetWrapper):
             except Exception:
                 hh = 0.0
 
-            # Classify by hhcount thresholds & explicit indicators
-            is_delin = (hh >= max_hh)
+            # Classify by hhcount thresholds & explicit indicators (strictly above max threshold)
+            is_delin = (hh > max_hh)
             if not is_delin and eadel_indi_idx != -1:
                 val = feat.attribute(eadel_indi_idx)
                 if val is not None and str(val).strip().lower() in ("for delineation", "for_delineation"):
-                    is_delin = True
+                    if hh > max_hh:
+                        is_delin = True
 
             is_merge = False
             if not is_delin and merge_indi_idx != -1:

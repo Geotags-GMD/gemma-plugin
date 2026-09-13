@@ -79,18 +79,19 @@ class TestTab2EmptyOutputs(unittest.TestCase):
         mock_alg.MERGED_OUTPUT = "MERGED_OUTPUT"
         mock_alg.SPECIAL_EA_OUTPUT = "SPECIAL_EA_OUTPUT"
         mock_alg.DELINEATION_CANDIDATE_OUTPUT = "DELINEATION_CANDIDATE_OUTPUT"
-        mock_alg.MERGE_CANDIDATE_OUTPUT = "MERGE_CANDIDATE_OUTPUT"
         mock_alg.EXTRACTED_BUILDINGS_OUTPUT = "EXTRACTED_BUILDINGS_OUTPUT"
 
         fields = QgsFields()
         fields.append(QgsField("geocode", QVariant.String))
         fields.append(QgsField("ean", QVariant.String))
 
+        dummy_layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "test", "memory")
         p1 = {
-            "previous_ea_source": MagicMock(),
-            "building_source": MagicMock(),
+            "previous_ea_source": dummy_layer,
+            "barangay_source": dummy_layer,
+            "building_source": dummy_layer,
             "out_fields": fields,
-            "target_crs": MagicMock(isGeographic=lambda: True, authid=lambda: "EPSG:4326"),
+            "target_crs": dummy_layer.crs(),
             "area_threshold": 1.0,
             "max_household": 300,
             "min_household": 100,
@@ -112,12 +113,9 @@ class TestTab2EmptyOutputs(unittest.TestCase):
             "extracted_buildings_sink": MagicMock(),
             "delineated_dest_id": "delin_id",
             "merged_dest_id": "merged_id",
-            "special_ea_dest_id": "special_id",
             "extracted_buildings_dest_id": "bldg_id",
             "delin_candidate_dest_id": "delin_cand_id",
-            "merge_candidate_dest_id": "merge_cand_id",
             "delin_candidate_feat_count": 0,
-            "merge_candidate_feat_count": 0,
             "extracted_bldg_feat_count": 0,
         }
         p3 = {"road_geoms": {}, "river_geoms": {}}
@@ -125,7 +123,9 @@ class TestTab2EmptyOutputs(unittest.TestCase):
         p7 = {"eas": [], "split_eas": []}
 
         feedback = MagicMock()
+        feedback.isCanceled.return_value = False
         multi_feedback = MagicMock()
+        multi_feedback.isCanceled.return_value = False
 
         outputs = run_phase_8(
             alg=mock_alg,
@@ -151,14 +151,36 @@ class TestTab2EmptyOutputs(unittest.TestCase):
         # Add an empty temporary layer to project
         empty_layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "01234_delineated_ea2026", "memory")
         project.addMapLayer(empty_layer)
-        self.assertIn(empty_layer.id(), project.mapLayers())
+        empty_layer_id = empty_layer.id()
+        self.assertIn(empty_layer_id, project.mapLayers())
 
         # Simulate cleanup logic
         for lyr_id, lyr_obj in list(project.mapLayers().items()):
             if lyr_obj.name() == "01234_delineated_ea2026" and lyr_obj.featureCount() == 0:
                 project.removeMapLayer(lyr_id)
 
-        self.assertNotIn(empty_layer.id(), project.mapLayers(), "Empty layer should be removed from project.")
+        self.assertNotIn(empty_layer_id, project.mapLayers(), "Empty layer should be removed from project.")
+
+    def test_tab2_dialog_omits_gap_overlap_inputs_and_special_ea(self):
+        """Verify that Tab 2 UI elements do not include gap/overlap combos or special_ea output label."""
+        import inspect
+        from references.create_enumeration_area import dialog
+        content_source = inspect.getsource(dialog.EALauncherDialog._build_create_ea_content)
+        self.assertNotIn("gap_combo", content_source)
+        self.assertNotIn("overlap_combo", content_source)
+        self.assertNotIn("out_special_lbl", content_source)
+        self.assertNotIn("special_ea", content_source)
+
+        pipeline_func = getattr(dialog.EALauncherDialog, "run_pipeline", None) or getattr(dialog.EALauncherDialog, "_run_pipeline", None)
+        if pipeline_func:
+            pipeline_source = inspect.getsource(pipeline_func)
+            self.assertNotIn("special_ea", pipeline_source)
+            self.assertNotIn("GAP_INPUT", pipeline_source)
+            self.assertNotIn("OVERLAP_INPUT", pipeline_source)
+            self.assertNotIn("SPECIAL_EA_OUTPUT", pipeline_source)
+            self.assertNotIn("MERGE_CANDIDATE_OUTPUT", pipeline_source)
+            self.assertNotIn("out_merge_cand_lbl", content_source)
+            self.assertNotIn("merge_cand_edit", content_source)
 
 
 if __name__ == "__main__":

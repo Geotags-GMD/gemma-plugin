@@ -43,14 +43,19 @@ class GMDPipeline(object):
         self.toolbar = None
         self.geometry_toolkit_dlg = None
         self.geometry_legacy_dlg = None
+        self.package_layers_dlg = None
         self.check_update_dlg = None
         self.push_dlg = None
         self.check_and_update_action = None
         self.comparison_panel_action = None
+        self.projection_finder_action = None
+        self.projection_finder_dlg = None
         self.create_ea_action = None
         self.ea_dlg = None
         self.offline_editing = None
         self.ea_provider = None
+        self.package_style_loader_action = None
+        self.package_style_loader_dlg = None
 
     def gema_add_submenu(self, submenu, icon):
         if self.gema_menu != None:
@@ -185,6 +190,8 @@ class GMDPipeline(object):
         updating_boundaries_icon = QIcon(os.path.dirname(__file__) + "/icons/updating_boundaries.svg")
         check_and_update_icon = QIcon(os.path.dirname(__file__) + "/icons/check_and_update.svg")
         compare_boundaries_icon = QIcon(os.path.dirname(__file__) + "/icons/compare_boundaries.svg")
+        projection_finder_icon = QIcon(os.path.dirname(__file__) + "/icons/projection_finder.svg")
+        package_layers_icon = QIcon(os.path.dirname(__file__) + "/icons/package_layers.svg")
 
         # 1. Updating of Boundaries Submenu
         self.updating_boundaries_menu = QMenu(u'Updating of Boundaries')
@@ -199,6 +206,19 @@ class GMDPipeline(object):
         )
         self.comparison_panel_action.triggered.connect(self.show_comparison_panel)
         self.updating_boundaries_menu.addAction(self.comparison_panel_action)
+
+        self.projection_finder_action = QAction(
+            projection_finder_icon, "Know Your Projection!", self.iface.mainWindow()
+        )
+        self.projection_finder_action.triggered.connect(self.show_projection_finder)
+        self.updating_boundaries_menu.addAction(self.projection_finder_action)
+
+        package_style_loader_icon = QIcon(os.path.dirname(__file__) + "/icons/package_style_loader.svg")
+        self.package_style_loader_action = QAction(
+            package_style_loader_icon, "Package Style Loader", self.iface.mainWindow()
+        )
+        self.package_style_loader_action.triggered.connect(self.show_package_style_loader_dialog)
+        self.updating_boundaries_menu.addAction(self.package_style_loader_action)
 
         # 2. EA Delineation Submenu
         self.ea_delineation_menu = QMenu(u'EA Delineation')
@@ -220,6 +240,10 @@ class GMDPipeline(object):
         self.geometry_legacy_action = QAction(geom_toolkit_icon, "Geometry Check & Repair (Legacy)", self.iface.mainWindow())
         self.geometry_legacy_action.triggered.connect(self.show_geometry_legacy)
         self.others_menu.addAction(self.geometry_legacy_action)
+
+        self.package_layers_action = QAction(package_layers_icon, "Package Layers by City/Mun", self.iface.mainWindow())
+        self.package_layers_action.triggered.connect(self.show_package_layers_dialog)
+        self.others_menu.addAction(self.package_layers_action)
 
         # Gemma Toolbar (Ordered Chronologically: Check and Update -> Create EAs -> Package for QField)
         self.toolbar = self.iface.addToolBar("Gemma Toolbar")
@@ -262,6 +286,20 @@ class GMDPipeline(object):
         if self.gema_menu is not None:
             self.iface.mainWindow().menuBar().removeAction(self.gema_menu.menuAction())
 
+        if self.projection_finder_dlg is not None:
+            try:
+                self.projection_finder_dlg.close()
+            except Exception:
+                pass
+            self.projection_finder_dlg = None
+
+        if self.package_style_loader_dlg is not None:
+            try:
+                self.package_style_loader_dlg.close()
+            except Exception:
+                pass
+            self.package_style_loader_dlg = None
+
         if self.toolbar:
             del self.toolbar
             self.toolbar = None
@@ -287,6 +325,24 @@ class GMDPipeline(object):
         self.geometry_legacy_dlg.show()
         self.geometry_legacy_dlg.raise_()
         self.geometry_legacy_dlg.activateWindow()
+
+    def show_package_layers_dialog(self):
+        """Open the Package Layers by City/Mun dialog."""
+        from .gmd_scripts.package_layers_by_citymun import PackageLayersDialog
+
+        # Guard against a stale C++ wrapper from a previously closed dialog
+        try:
+            if self.package_layers_dlg is not None:
+                self.package_layers_dlg.isVisible()
+        except RuntimeError:
+            self.package_layers_dlg = None
+
+        if self.package_layers_dlg is None:
+            self.package_layers_dlg = PackageLayersDialog(self.iface)
+
+        self.package_layers_dlg.show()
+        self.package_layers_dlg.raise_()
+        self.package_layers_dlg.activateWindow()
 
     def show_package_dialog(self):
         """
@@ -371,6 +427,24 @@ class GMDPipeline(object):
         self.ea_dlg.raise_()
         self.ea_dlg.activateWindow()
 
+    def show_projection_finder(self):
+        """Open the Know Your Projection! (Projection Finder) dialog."""
+        from .gmd_scripts.projection_finder import ProjectionToolkit
+
+        try:
+            if self.projection_finder_dlg is not None:
+                self.projection_finder_dlg.isVisible()
+        except RuntimeError:
+            self.projection_finder_dlg = None
+
+        if self.projection_finder_dlg is None:
+            self.projection_finder_dlg = ProjectionToolkit(self.iface)
+
+        self.projection_finder_dlg.showNormal()
+        self.projection_finder_dlg.show()
+        self.projection_finder_dlg.raise_()
+        self.projection_finder_dlg.activateWindow()
+
     def push_dialog_finished(self):
         """
         When the push dialog is closed, make sure it's no longer
@@ -380,3 +454,24 @@ class GMDPipeline(object):
             self.push_dlg.setEnabled(False)
         except RuntimeError:
             pass
+
+    def show_package_style_loader_dialog(self):
+        """Open the Package Style Loader dialog."""
+        from .gmd_scripts.package_style_loader import show_package_style_loader_dialog
+
+        try:
+            if self.package_style_loader_dlg is not None:
+                self.package_style_loader_dlg.isVisible()
+        except RuntimeError:
+            self.package_style_loader_dlg = None
+
+        if self.package_style_loader_dlg is None:
+            self.package_style_loader_dlg = show_package_style_loader_dialog(self.iface)
+        else:
+            self.package_style_loader_dlg.showNormal()
+            self.package_style_loader_dlg.show()
+            self.package_style_loader_dlg.raise_()
+            self.package_style_loader_dlg.activateWindow()
+
+    # Alias for backward compatibility
+    show_layer_groups_styles_dialog = show_package_style_loader_dialog

@@ -25,6 +25,7 @@ from qgis.core import (
 
 # Official QML Style Mapping for Base Layers
 QML_BASE_LAYER_MAP = [
+    (["extracted_bldgpts", "extracted_bldg_pts", "extracted_building"], "extracted_bldgpts.qml"),
     (["bldg_point", "bldgpts", "bldg_pts", "building_point"], "1. Base Layer Building Points.qml"),
     (["sf_landmark", "old_landmark", "landmark"], "2. Base Layer Landmark.qml"),
     (["block"], "3. Base Layer Block.qml"),

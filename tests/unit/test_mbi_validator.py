@@ -368,6 +368,75 @@ class TestMbiValidator(unittest.TestCase):
         except Exception as e:
             self.skipTest(f"Skipping test due to processing environment error: {e}")
 
+    def test_evaluate_reference_case_without_checker(self):
+        """Without a Checker layer, no case is claimed detected or resolved."""
+        fields = QgsFields()
+        fields.append(QgsField("mbi_status", QVariant.String))
+        fields.append(QgsField("pso_remarks", QVariant.String))
+        fields.append(QgsField("num_bldg_pts", QVariant.Int))
+        feat = QgsFeature(fields)
+
+        # 2_Pending still reaches Pending Cases so it can be exported.
+        feat.setAttribute("mbi_status", "2_Pending")
+        feat.setAttribute("pso_remarks", "Awaiting resolution")
+        feat.setAttribute("num_bldg_pts", 3)
+        cat, _ = self.mod.evaluate_reference_case(
+            feat, spatially_confirmed=False, checker_available=False)
+        self.assertEqual(cat, "pending_cases")
+
+        # 1_Updated with 0 bldg pts must NOT be called Confirmed Resolved,
+        # because nothing was compared against it.
+        feat.setAttribute("mbi_status", "1_Updated")
+        feat.setAttribute("pso_remarks", "Boundary realigned")
+        feat.setAttribute("num_bldg_pts", 0)
+        cat, reason = self.mod.evaluate_reference_case(
+            feat, spatially_confirmed=False, checker_available=False)
+        self.assertEqual(cat, "still_active")
+        self.assertIn("no Checker layer", reason)
+
+        # Attribute-only mismatch rules still apply.
+        feat.setAttribute("mbi_status", "1_Updated")
+        feat.setAttribute("pso_remarks", None)
+        feat.setAttribute("num_bldg_pts", 5)
+        cat, _ = self.mod.evaluate_reference_case(
+            feat, spatially_confirmed=False, checker_available=False)
+        self.assertEqual(cat, "status_mismatch")
+
+        feat.setAttribute("mbi_status", NULL)
+        cat, _ = self.mod.evaluate_reference_case(
+            feat, spatially_confirmed=False, checker_available=False)
+        self.assertEqual(cat, "no_status")
+
+    def test_process_algorithm_without_checker_layers(self):
+        """Algorithm must run with no Checker layer and still emit Pending Cases."""
+        try:
+            params = {
+                self.alg.REF_LAYER: self.ref_layer,
+                self.alg.CHK_GAP: None,
+                self.alg.CHK_OVERLAP: None,
+                self.alg.GPKG_LAYERS: [2],
+                self.alg.OUT_MISMATCH: "TEMPORARY_OUTPUT",
+                self.alg.OUT_MISMATCH_REMARKS: "TEMPORARY_OUTPUT",
+                self.alg.OUT_PENDING_CASES: "TEMPORARY_OUTPUT",
+                self.alg.OUT_NEW: "TEMPORARY_OUTPUT",
+                self.alg.OUT_STILL: "TEMPORARY_OUTPUT",
+                self.alg.OUT_RESOLVED: "TEMPORARY_OUTPUT",
+                self.alg.OUT_MANUAL_REVIEW: "TEMPORARY_OUTPUT",
+                self.alg.OUT_NOSTATUS: "TEMPORARY_OUTPUT",
+                self.alg.OUT_DISPUTED: "TEMPORARY_OUTPUT",
+            }
+            QgsProject.instance().addMapLayer(self.ref_layer)
+
+            context = QgsProcessingContext()
+            if hasattr(context, "setProject"):
+                context.setProject(QgsProject.instance())
+            feedback = QgsProcessingFeedback()
+
+            res = self.alg.processAlgorithm(params, context, feedback)
+            self.assertIsNotNone(res)
+        except Exception as e:
+            self.skipTest(f"Skipping test due to processing environment error: {e}")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -69,6 +69,12 @@ class MockGenericClass(metaclass=MockMetaClass):
     def __index__(self): return 0
     def __len__(self): return 0
     def __bool__(self): return True
+    def __gt__(self, other): return False
+    def __ge__(self, other): return False
+    def __lt__(self, other): return False
+    def __le__(self, other): return False
+    def __eq__(self, other): return False
+    def __ne__(self, other): return True
     def __or__(self, other): return self
     def __ror__(self, other): return self
     def __and__(self, other): return self
@@ -81,6 +87,28 @@ class MockGenericClass(metaclass=MockMetaClass):
 
     def __call__(self, *args, **kwargs):
         return MockGenericClass()
+
+
+class QgsMapLayerComboBox(MockGenericClass):
+    def __init__(self, parent=None):
+        self._layer = None
+        self.layerChanged = MockSignal()
+
+    def setLayer(self, layer):
+        self._layer = layer
+        self.layerChanged.emit(layer)
+
+    def currentLayer(self):
+        return self._layer
+
+    def setFilters(self, filters):
+        pass
+
+    def setMinimumHeight(self, h):
+        pass
+
+    def setFixedHeight(self, h):
+        pass
 
 
 class QgsPointXY:
@@ -109,6 +137,68 @@ class QgsPointXY:
 class QgsPolygon:
     def __init__(self):
         self._points = []
+
+
+class QgsRectangle:
+    def __init__(self, xmin=0.0, ymin=0.0, xmax=0.0, ymax=0.0):
+        if isinstance(xmin, QgsRectangle):
+            other = xmin
+            self._xmin = float(other.xMinimum())
+            self._ymin = float(other.yMinimum())
+            self._xmax = float(other.xMaximum())
+            self._ymax = float(other.yMaximum())
+        elif hasattr(xmin, 'x') and hasattr(ymin, 'x'):
+            p1, p2 = xmin, ymin
+            self._xmin = min(float(p1.x()), float(p2.x()))
+            self._xmax = max(float(p1.x()), float(p2.x()))
+            self._ymin = min(float(p1.y()), float(p2.y()))
+            self._ymax = max(float(p1.y()), float(p2.y()))
+        else:
+            try:
+                self._xmin = float(xmin)
+                self._ymin = float(ymin)
+                self._xmax = float(xmax)
+                self._ymax = float(ymax)
+            except (TypeError, ValueError):
+                self._xmin = 0.0
+                self._ymin = 0.0
+                self._xmax = 0.0
+                self._ymax = 0.0
+
+    def xMinimum(self): return self._xmin
+    def yMinimum(self): return self._ymin
+    def xMaximum(self): return self._xmax
+    def yMaximum(self): return self._ymax
+    def width(self): return max(0.0, self._xmax - self._xmin)
+    def height(self): return max(0.0, self._ymax - self._ymin)
+    def isEmpty(self): return self.width() <= 0.0 or self.height() <= 0.0
+    def isNull(self): return self.isEmpty()
+    def center(self): return QgsPointXY(self._xmin + self.width() / 2.0, self._ymin + self.height() / 2.0)
+    def setMinimal(self):
+        self._xmin = float('inf')
+        self._ymin = float('inf')
+        self._xmax = float('-inf')
+        self._ymax = float('-inf')
+    def combineExtentWith(self, other):
+        if hasattr(other, 'xMinimum'):
+            self._xmin = min(self._xmin, other.xMinimum())
+            self._ymin = min(self._ymin, other.yMinimum())
+            self._xmax = max(self._xmax, other.xMaximum())
+            self._ymax = max(self._ymax, other.yMaximum())
+    def intersects(self, other):
+        if hasattr(other, 'xMinimum'):
+            return not (self._xmax < other.xMinimum() or self._xmin > other.xMaximum() or
+                        self._ymax < other.yMinimum() or self._ymin > other.yMaximum())
+        return False
+    def contains(self, other):
+        if hasattr(other, 'xMinimum'):
+            return (self._xmin <= other.xMinimum() and self._xmax >= other.xMaximum() and
+                    self._ymin <= other.yMinimum() and self._ymax >= other.yMaximum())
+        elif hasattr(other, 'x'):
+            return (self._xmin <= other.x() <= self._xmax and self._ymin <= other.y() <= self._ymax)
+        return False
+    def __repr__(self):
+        return f"QgsRectangle({self._xmin}, {self._ymin}, {self._xmax}, {self._ymax})"
 
 
 class QgsGeometry:
@@ -232,6 +322,23 @@ class QgsGeometry:
     @staticmethod
     def fromMultiPolylineXY(multipoly):
         return QgsGeometry("MultiLineString")
+
+    @staticmethod
+    def fromMultiPointXY(multipoint):
+        return QgsGeometry("MultiPoint")
+
+    @staticmethod
+    def fromRect(rect):
+        if hasattr(rect, 'xMinimum'):
+            xmin, ymin, xmax, ymax = rect.xMinimum(), rect.yMinimum(), rect.xMaximum(), rect.yMaximum()
+            return QgsGeometry.fromPolygonXY([[
+                QgsPointXY(xmin, ymin),
+                QgsPointXY(xmax, ymin),
+                QgsPointXY(xmax, ymax),
+                QgsPointXY(xmin, ymax),
+                QgsPointXY(xmin, ymin),
+            ]])
+        return QgsGeometry("Polygon", [])
 
     def type(self):
         if self.geom_type == "Point": return 0
@@ -615,8 +722,35 @@ class QgsVectorDataProvider:
             self._layer._features.append(feat)
         return True, features
 
+    def deleteFeatures(self, fids):
+        fids_set = set(fids)
+        self._layer._features = [f for f in self._layer._features if f.id() not in fids_set]
+        return True
+
     def fields(self):
         return self._layer._fields
+
+
+class MockSignal:
+    def __init__(self):
+        self._slots = []
+
+    def connect(self, slot):
+        if slot not in self._slots:
+            self._slots.append(slot)
+
+    def disconnect(self, slot=None):
+        if slot is None:
+            self._slots.clear()
+        elif slot in self._slots:
+            self._slots.remove(slot)
+
+    def emit(self, *args, **kwargs):
+        for slot in list(self._slots):
+            try:
+                slot(*args, **kwargs)
+            except Exception:
+                pass
 
 
 _MOCK_LAYER_CACHE = {}
@@ -629,6 +763,8 @@ class QgsVectorLayer:
         self._provider = provider
         self._fields = QgsFields()
         self._features = []
+        self._selected_fids = set()
+        self.selectionChanged = MockSignal()
         raw_path = str(path).split("|")[0].replace("\\", "/")
         if raw_path in _MOCK_LAYER_CACHE:
             cached_fields, cached_feats = _MOCK_LAYER_CACHE[raw_path]
@@ -639,15 +775,21 @@ class QgsVectorLayer:
                 cf.setGeometry(feat.geometry())
                 cf.setAttributes(list(feat.attributes()))
                 cf.setId(feat.id())
-                self._features.append(cf)
+        self._custom_properties = {}
+        self._subset_string = ""
 
     def name(self): return self._name
+    def setName(self, name): self._name = name
     def isValid(self): return True
+    def isEditable(self): return False
+    def rollBack(self): return True
     def featureCount(self): return len(self._features)
     def fields(self): return self._fields
     def setFields(self, fields): self._fields = fields
     def setFeatures(self, features): self._features = features
     def dataProvider(self): return QgsVectorDataProvider(self)
+    def addFeatures(self, features): return self.dataProvider().addFeatures(features)
+    def deleteFeatures(self, fids): return self.dataProvider().deleteFeatures(fids)
     def updateFields(self): pass
     def updateExtents(self): pass
     def extent(self): return MockGenericClass()
@@ -658,9 +800,28 @@ class QgsVectorLayer:
     def wkbType(self): return 3  # Polygon
     def geometryType(self): return 2  # PolygonGeometry
     def id(self): return f"layer_{self._name}"
-    def setSubsetString(self, string): return True
+    def setSubsetString(self, string):
+        self._subset_string = string
+        return True
+    def subsetString(self): return self._subset_string
+    def setCustomProperty(self, key, value): self._custom_properties[key] = value
+    def customProperty(self, key, default_val=None): return self._custom_properties.get(key, default_val)
     def selectByExpression(self, expr): pass
-    def selectedFeatureCount(self): return 0
+    def selectByIds(self, fids):
+        self._selected_fids = set(fids)
+        self.selectionChanged.emit()
+    def removeSelection(self):
+        self._selected_fids = set()
+        self.selectionChanged.emit()
+    def selectAll(self):
+        self._selected_fids = set(f.id() for f in self._features)
+        self.selectionChanged.emit()
+    def selectedFeatureIds(self):
+        return list(self._selected_fids)
+    def selectedFeatures(self):
+        return [f for f in self._features if f.id() in self._selected_fids]
+    def selectedFeatureCount(self):
+        return len(self._selected_fids)
     def triggerRepaint(self): pass
     def isEditable(self): return getattr(self, '_is_editable', False)
     def startEditing(self):
@@ -683,6 +844,51 @@ class QgsVectorLayer:
                 feat.setAttribute(field_idx, value)
                 return True
         return False
+    def setEditorWidgetSetup(self, field_idx, setup):
+        if not hasattr(self, '_editor_widget_setups'):
+            self._editor_widget_setups = {}
+        self._editor_widget_setups[field_idx] = setup
+    def editorWidgetSetup(self, field_idx):
+        if not hasattr(self, '_editor_widget_setups'):
+            self._editor_widget_setups = {}
+        return self._editor_widget_setups.get(field_idx, QgsEditorWidgetSetup())
+    def editFormConfig(self):
+        if not hasattr(self, '_edit_form_config') or self._edit_form_config is None:
+            self._edit_form_config = QgsEditFormConfig()
+        return self._edit_form_config
+    def setEditFormConfig(self, config):
+        self._edit_form_config = config
+    def loadNamedStyle(self, uri, categories=None):
+        return ("Success", True)
+    def emitStyleChanged(self):
+        pass
+    def setReadOnly(self, readonly=True):
+        self._layer_readonly = readonly
+    def isReadOnly(self):
+        return getattr(self, '_layer_readonly', False)
+
+
+class QgsEditFormConfig:
+    def __init__(self):
+        self._read_only = {}
+
+    def setReadOnly(self, field_idx, read_only=True):
+        self._read_only[field_idx] = read_only
+
+    def readOnly(self, field_idx):
+        return self._read_only.get(field_idx, False)
+
+
+class QgsEditorWidgetSetup:
+    def __init__(self, widget_type="", config=None):
+        self._type = widget_type
+        self._config = config or {}
+
+    def type(self):
+        return self._type
+
+    def config(self):
+        return self._config
 
 
 class QgsProcessingFeedback:
@@ -736,6 +942,8 @@ try:
         QgsProcessingFeedback = qgis.core.QgsProcessingFeedback
     if hasattr(qgis.core, "QgsVectorLayer"):
         QgsVectorLayer = qgis.core.QgsVectorLayer
+    if hasattr(qgis.core, "QgsEditorWidgetSetup"):
+        QgsEditorWidgetSetup = qgis.core.QgsEditorWidgetSetup
 except Exception:
     pass
 
@@ -837,6 +1045,50 @@ class QgsVectorFileWriter:
 
 
 
+class QgsProcessingParameterDefinition:
+    def __init__(self, name="", description="", *args, **kwargs):
+        self._name = str(name)
+        self._description = str(description)
+
+    def name(self):
+        return self._name
+
+    def description(self):
+        return self._description
+
+
+class QgsProcessingParameterMultipleLayers(QgsProcessingParameterDefinition):
+    pass
+
+
+class QgsProcessingParameterEnum(QgsProcessingParameterDefinition):
+    pass
+
+
+class QgsProcessingParameterVectorLayer(QgsProcessingParameterDefinition):
+    pass
+
+
+class QgsProcessingParameterFeatureSink(QgsProcessingParameterDefinition):
+    pass
+
+
+class QgsProcessingParameterFile(QgsProcessingParameterDefinition):
+    pass
+
+
+class QgsProcessingParameterString(QgsProcessingParameterDefinition):
+    pass
+
+
+class QgsProcessingParameterBoolean(QgsProcessingParameterDefinition):
+    pass
+
+
+class QgsProcessingParameterNumber(QgsProcessingParameterDefinition):
+    pass
+
+
 class QgsProcessingAlgorithm:
     def __init__(self, *args, **kwargs):
         self._parameters = {}
@@ -863,7 +1115,7 @@ class QgsProcessingAlgorithm:
     def parameterDefinition(self, name):
         if not hasattr(self, "_parameters"):
             self._parameters = {}
-        return self._parameters.get(name, MockGenericClass())
+        return self._parameters.get(name, None)
 
 
     def parameterAsLayerList(self, parameters, name, context):
@@ -934,6 +1186,12 @@ class QgsProject:
             cls._instance = QgsProject()
         return cls._instance
 
+    def homePath(self):
+        return ""
+
+    def fileName(self):
+        return ""
+
     def addMapLayer(self, layer, addToLegend=True):
         if layer:
             lid = layer.id() if hasattr(layer, "id") else str(id(layer))
@@ -977,6 +1235,7 @@ class QgsApplication:
     def processingRegistry():
         class MockRegistry:
             def addProvider(self, provider): pass
+            def algorithmById(self, id): return None
         return MockRegistry()
 
 
@@ -1035,8 +1294,23 @@ class MockQCoreApplication:
     def translate(context, sourceText, disambiguation=None, n=-1):
         return sourceText
 
+    @staticmethod
+    def processEvents(*args, **kwargs):
+        pass
 
-class MockQThread: pass
+    @staticmethod
+    def instance(*args, **kwargs):
+        return MockGenericClass()
+
+
+class MockQThread:
+    @staticmethod
+    def idealThreadCount():
+        return 4
+
+    @staticmethod
+    def currentThread():
+        return 1
 class MockQObject:
     def __init__(self, parent=None): pass
     def tr(self, s, *args, **kwargs): return s
@@ -1195,6 +1469,7 @@ def setup_qgis_mock_if_needed():
 
     # Explicit Core attributes
     core_mod.QgsPointXY = QgsPointXY
+    core_mod.QgsRectangle = QgsRectangle
     core_mod.QgsPolygon = QgsPolygon
     core_mod.QgsGeometry = QgsGeometry
     core_mod.QgsField = QgsField
@@ -1211,12 +1486,82 @@ def setup_qgis_mock_if_needed():
     core_mod.QgsApplication = QgsApplication
     core_mod.QgsWkbTypes = QgsWkbTypes
     core_mod.QgsVectorFileWriter = QgsVectorFileWriter
+    core_mod.QgsEditorWidgetSetup = QgsEditorWidgetSetup
+    core_mod.QgsEditFormConfig = QgsEditFormConfig
+    core_mod.QgsProcessingParameterDefinition = QgsProcessingParameterDefinition
+    core_mod.QgsProcessingParameterMultipleLayers = QgsProcessingParameterMultipleLayers
+    core_mod.QgsProcessingParameterEnum = QgsProcessingParameterEnum
+    core_mod.QgsProcessingParameterVectorLayer = QgsProcessingParameterVectorLayer
+    core_mod.QgsProcessingParameterFeatureSink = QgsProcessingParameterFeatureSink
+    core_mod.QgsProcessingParameterFile = QgsProcessingParameterFile
+    core_mod.QgsProcessingParameterString = QgsProcessingParameterString
+    core_mod.QgsProcessingParameterBoolean = QgsProcessingParameterBoolean
+    core_mod.QgsProcessingParameterNumber = QgsProcessingParameterNumber
 
     # PyQt attributes
-    class MockSignal:
-        def emit(self, *args, **kwargs): pass
-        def connect(self, *args, **kwargs): pass
-        def disconnect(self, *args, **kwargs): pass
+    class MockQWidget:
+        def __init__(self, parent=None, *args, **kwargs):
+            self._parent = parent
+            self._enabled = True
+        def setParent(self, parent): self._parent = parent
+        def parent(self): return self._parent
+        def setEnabled(self, enabled): self._enabled = bool(enabled)
+        def isEnabled(self): return bool(self._enabled)
+        def setWindowTitle(self, title): pass
+        def setLayout(self, layout): pass
+        def setMinimumSize(self, *args): pass
+        def setMinimumWidth(self, *args): pass
+        def setMinimumHeight(self, *args): pass
+        def setMaximumHeight(self, *args): pass
+        def setFixedHeight(self, *args): pass
+        def resize(self, *args): pass
+        def show(self): pass
+        def hide(self): pass
+        def setStyleSheet(self, style): pass
+        def setFont(self, font): pass
+
+    class MockQDialog(MockQWidget):
+        def exec_(self): return 1
+        def exec(self): return 1
+        def accept(self): pass
+        def reject(self): pass
+        def close(self): pass
+
+    class MockQCheckBox(MockQWidget):
+        def __init__(self, text="", parent=None):
+            super().__init__(parent)
+            self._text = text
+            self._checked = False
+            self.toggled = MockSignal()
+
+        def isChecked(self): return bool(self._checked)
+        def setChecked(self, checked):
+            self._checked = bool(checked)
+            self.toggled.emit(self._checked)
+        def text(self): return self._text
+        def setText(self, text): self._text = text
+        def setToolTip(self, tip): pass
+
+    class MockQSpinBox(MockQWidget):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self._value = 0
+            self._range = (0, 99999)
+        def setValue(self, v): self._value = int(v)
+        def value(self): return int(self._value)
+        def setRange(self, min_v, max_v): self._range = (min_v, max_v)
+        def setToolTip(self, tip): pass
+
+    class MockQDoubleSpinBox(MockQWidget):
+        def __init__(self, parent=None):
+            super().__init__(parent)
+            self._value = 0.0
+            self._range = (0.0, 99999.0)
+        def setValue(self, v): self._value = float(v)
+        def value(self): return float(self._value)
+        def setRange(self, min_v, max_v): self._range = (min_v, max_v)
+        def setSingleStep(self, step): pass
+        def setToolTip(self, tip): pass
 
     qtcore_mod.QCoreApplication = MockQCoreApplication
     qtcore_mod.QThread = MockQThread
@@ -1227,6 +1572,11 @@ def setup_qgis_mock_if_needed():
 
     qtgui_mod.QWidget = MockQWidget
     qtgui_mod.QDialog = MockQDialog
+    qtgui_mod.QCheckBox = MockQCheckBox
+    qtgui_mod.QSpinBox = MockQSpinBox
+    qtgui_mod.QDoubleSpinBox = MockQDoubleSpinBox
+
+    gui_mod.QgsMapLayerComboBox = QgsMapLayerComboBox
 
     pyqt_mod.QtCore = qtcore_mod
     pyqt_mod.QtWidgets = qtgui_mod
@@ -1277,6 +1627,9 @@ def setup_qgis_mock_if_needed():
 
         pyqt5_qtgui_mod.QWidget = MockQWidget
         pyqt5_qtgui_mod.QDialog = MockQDialog
+        pyqt5_qtgui_mod.QCheckBox = MockQCheckBox
+        pyqt5_qtgui_mod.QSpinBox = MockQSpinBox
+        pyqt5_qtgui_mod.QDoubleSpinBox = MockQDoubleSpinBox
 
         pyqt5_mod.QtCore = pyqt5_qtcore_mod
         pyqt5_mod.QtWidgets = pyqt5_qtgui_mod

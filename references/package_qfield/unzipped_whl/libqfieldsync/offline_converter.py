@@ -763,9 +763,23 @@ class OfflineConverter(QObject):
         self.task_progress_updated.emit(int(revision), 100)
 
     def _on_offline_editing_next_layer(self, layer_index, layer_count):
-        msg = self.trUtf8("Packaging layer {layer_name}…").format(
-            layer_name=self.__offline_layer_names[layer_index - 1]
-        )
+        layer_name = ""
+        if 1 <= layer_index <= len(self.__offline_layer_names):
+            layer_name = self.__offline_layer_names[layer_index - 1]
+        elif 0 <= layer_index < len(self.__offline_layer_names):
+            layer_name = self.__offline_layer_names[layer_index]
+        elif self.__offline_layer_names:
+            safe_idx = min(max(0, layer_index - 1), len(self.__offline_layer_names) - 1)
+            layer_name = self.__offline_layer_names[safe_idx]
+        else:
+            layer_name = str(layer_index)
+
+        try:
+            msg = self.trUtf8("Packaging layer {layer_name}…").format(
+                layer_name=layer_name
+            )
+        except Exception:
+            msg = f"Packaging layer {layer_name}…"
         self.total_progress_updated.emit(layer_index, layer_count, msg)
 
     def _on_offline_editing_max_changed(self, _, mode_count):

@@ -61,6 +61,8 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QVariant
 
+from .helpers.constants import create_qgs_field
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -187,6 +189,9 @@ _OUTPUT_FIELD_SPECS = (
     ("eacount", QVariant.Int),
     ("remarks", QVariant.String),
 )
+
+_GEOCODE_FIELDS = _FIELD_CANDIDATE_MAP["geocode"]
+_CITYMUN_FIELDS = _FIELD_CANDIDATE_MAP["city_mun"]
 
 
 def _ea_type_from_layer_name(layer_name: str) -> str:
@@ -604,7 +609,7 @@ class EAMergeProcessor:
             else:
                 # Default: same directory as the QGIS project file
                 project_home = QgsProject.instance().homePath()
-                if project_home:
+                if project_home and isinstance(project_home, str) and os.path.exists(project_home):
                     excel_path = get_unique_filepath(project_home, excel_base, ".xlsx")
                 else:
                     excel_path = get_unique_filepath(os.path.expanduser("~"), excel_base, ".xlsx")
@@ -843,9 +848,9 @@ class EAMergeProcessor:
         for fname, default_type in _OUTPUT_FIELD_SPECS:
             existing_field = ea_field_map.get(fname.lower())
             if existing_field is not None:
-                out_fields.append(QgsField(fname, existing_field.type()))
+                out_fields.append(create_qgs_field(fname, existing_field.type()))
             else:
-                out_fields.append(QgsField(fname, default_type))
+                out_fields.append(create_qgs_field(fname, default_type))
 
         return out_fields
 

@@ -30,7 +30,7 @@ The **EA Delineation and Merging** launcher dialog provides an interactive workf
 
 - **Dual-Tab Processing Launcher:** Switch seamlessly between **EA Preprocessing** (Tab 1) and **EA Delineation & Merging** (Tab 2).
 - **Auto-Detect Project Layers:** Automatically scans open layers in the QGIS project and populates input dropdowns based on standard layer naming conventions (`_bgy`, `_ea`, `_bldgpts`, `road`, `river`).
-- **Auto Arrange Layers:** One-click utility inside **Input Layers** that restructures project layer tree nodes into `<PSGC>_<City_Mun>_MBI` and `<PSGC>_<City_Mun>_baselayers` groups, re-orders layers (Points → Lines → Polygons → Rasters), renames gaps/overlaps (`<PSGC>_gaps`, `<PSGC>_overlaps`), and applies official GEMMA QML style templates (`1. Base Layer Building Points.qml`, `2. Base Layer Landmark.qml`, etc.).
+- **Auto Arrange Layers:** One-click utility inside **Input Layers** on **Tab 1 (EA Preprocessing)** that restructures project layer tree nodes into `<PSGC>_<City_Mun>_MBI` and `<PSGC>_<City_Mun>_baselayers` groups, re-orders layers (Points → Lines → Polygons → Rasters), renames gaps/overlaps (`<PSGC>_gaps`, `<PSGC>_overlaps`), and applies official GEMMA QML style templates (`1. Base Layer Building Points.qml`, `2. Base Layer Landmark.qml`, etc.).
 - **Fill Missing Household Counts:** Built-in utility to compute missing household counts (`hh_count`) directly from building points within each EA polygon before running delineation algorithms.
 - **KPI Summary Cards & Candidate Preview:** Renders dynamic statistics and color-coded candidate tables for Delineation (>300 HH) and Merging (<=100 HH) candidates before execution.
 
@@ -78,42 +78,58 @@ Tab 1 allows you to designate the target destination directory before running:
 
 ---
 
-## Tab 2 — EA Delineation & Merging
+## Tab 2 — Create Enumeration Areas
 
-The **EA Delineation & Merging** tab executes spatial aggregation, single-pass splitting for overpopulated EAs, and iterative merging for underpopulated EAs.
+The **Create Enumeration Areas** tab executes spatial aggregation, proposed boundary cut line generation for overpopulated EAs without destructively splitting EA polygons, and iterative merging for underpopulated EAs.
+
+To provide a clean and focused workflow, Tab 2 is split into two dedicated sub-tabs with **completely separated Live Preview tables, Execution Log consoles, and Action Run Buttons**:
+
+1. **Proposed Delineation Sub-Tab**: Focused on overpopulated EAs (`> 300 HH`). Features delineation threshold settings, road/river boundary snapping parameters, an isolated **Delineation Candidates Preview** table with KPI counter card, a dedicated delineation execution log console, and two action buttons:
+   - **Extract Delineation Candidate**: Generates and loads candidate layers (`<geocode>_delineated_ea2026.gpkg`, `<geocode>_delineation_candidates`, `<geocode>_extracted_bldgpts`, `<geocode>_eadel_update.gpkg`).
+   - **Run Delineation**: Opens a dedicated modal pop-up to split EA polygons with proposed cut lines in-place and recalculate building and household counts.
+2. **Proposed Merging Sub-Tab**: Focused on underpopulated EAs (`<= 100 HH`). Features merging threshold settings, under-threshold candidate-to-candidate merging toggles, an isolated **Merge Candidates Preview** table with KPI counter card, a dedicated merging execution log console, and two action buttons:
+   - **Extract Merge Candidate**: Generates and loads candidate layers (`<geocode>_merged_ea2026.gpkg`, `<geocode>_extracted_bldgpts`).
+   - **Unmerge EA**: Opens a dedicated modal pop-up to unmerge recently merged EA polygons back into their constituent original geometries based on the EA previous layer, updating the merged layer in-place and recalculating `hh_count` (from building points `est_hhcount`) and `bldg_count` for each restored EA.
+3. **Merge Preview Tab (Individual EA Merging & Threshold Gating)**:
+   - Dedicated preview tab evaluating candidate EAs from the **Merged EA Layer** against potential contiguous absorptive partners in the **Previous EA Layer**.
+   - Structured with an 8-column layout: `Geocode`, `Barangay`, `EA Name`, `Household Count`, `Role / Status`, `Merge Partner (EAN)`, `Total HH Count`, and `Action`.
+   - **Maximum Threshold Gating**: Evaluates candidates against the maximum household threshold limit. If combined candidate EA and partner EA households exceed the maximum threshold (`max_hh`), that partner is excluded. If no partner meets the threshold criteria (or candidate EA alone exceeds the maximum threshold), the `Merge Partner (EAN)` dropdown is empty and disabled, and the `Action` button is disabled.
+   - **Individual EA Merging**: Allows granular, on-demand merging row-by-row via the green `[Merge]` action button. Clicking `[Merge]` unites candidate and partner geometries (`combine().buffer(0).makeValid()`), aggregates combined household counts, registers the merged polygon into `<geocode>_merged_ea2026` (and exports to `.gpkg` if an output folder is defined), updates the row status to `Merged ✓`, and locks the row against re-merging.
+
+> [!TIP]
+> **Two-Way Synchronization**: Selecting input layers, designating output directories, updating search filters, or adjusting shared threshold parameters in either sub-tab automatically synchronizes the corresponding controls across both sub-tabs in real time. Running either action button automatically discards temporary in-memory outputs belonging to the opposite sub-tab mode.
 
 ### Parameters & Options
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| **Barangay Layer** | Vector (Polygon) | Administrative barangay boundaries (`geocode` field required). Required. |
-| **Building Point Layer** | Vector (Point) | Structure/building point data with an `hhcount` field representing households per building. Required. |
-| **Previous EA Layer** | Vector (Polygon) | Starting EA boundaries from previous census round (or pre-processed output from Tab 1). Required. |
-| **Road Layer** | Vector (Line) | Road network lines used to snap EA split boundaries to road centrelines. Optional. |
-| **River Layer** | Vector (Line) | River and waterway centrelines used for split line snapping. Optional. |
-| **Minimum Household Count per EA** | Integer | Minimum target household threshold per EA (default: `100`). EAs below this limit are merged. |
-| **Maximum Household Count per EA** | Integer | Maximum target household threshold per EA (default: `300`). EAs above this limit are split. |
+| **Barangay Layer** | Vector (Polygon) | Administrative barangay boundaries (`geocode` field required). Synchronized across both sub-tabs. Required. |
+| **Building Point Layer** | Vector (Point) | Structure/building point data with an `hhcount` field representing households per building. Synchronized across both sub-tabs. Required. |
+| **Previous EA Layer** | Vector (Polygon) | Starting EA boundaries from previous census round (or pre-processed output from Tab 1). Synchronized across both sub-tabs. Required. |
+| **Road Layer** | Vector (Line) | Road network lines used to snap EA split boundaries to road centrelines (Delineation sub-tab). Optional. |
+| **River Layer** | Vector (Line) | River and waterway centrelines used for split line snapping (Delineation sub-tab). Optional. |
+| **Minimum Household Count per EA** | Integer | Minimum target household threshold per EA (default: `100`). EAs below this limit are classified as merge candidates. |
+| **Maximum Household Count per EA** | Integer | Maximum target household threshold per EA (default: `300`). EAs above this limit generate proposed delineation cut lines. |
 | **Splitting Rule (>300 Houses)** | Enumeration | Controls splitting rule: `Follow Roads & Rivers (Recommended)`, `Strict Minimum 100 Houses`, or `Do Not Split`. |
 | **Boundary Cut Method** | Enumeration | Selects line tool for splitting: `Auto (Roads First, then Houses)`, `Roads & Rivers Only`, `House Groups Only`, `Straight Line Only`, or `Do Not Split`. |
 | **Optimize for Compactness** | Boolean | Prefers spatially compact EA shapes over purely household-balanced splits (default: `True`). |
 | **Allow Merging Candidate EAs** | Boolean | Allows candidate EAs (<=100 HH) to merge with each other when no reference EAs exist (default: `True`). |
 | **Sliver Polygon Area Threshold** | Enumeration | Threshold for identifying and dissolving remnant sliver polygons into neighboring EAs. |
 | **Snapping Tolerance (metres)** | Double | Maximum search distance for snapping proposed split lines to road or river centrelines (default: `15.0 m`). |
-| **Target CRS** | CRS | Output Coordinate Reference System (default: `EPSG:4326`). |
+| **Target CRS** | CRS | Output Coordinate Reference System (default: `EPSG:4326`). Synchronized across both sub-tabs. |
 
 ### Outputs & QML Symbology Styles
 
-| Output Layer | Type | Style File (.qml) | Description |
-|--------------|------|-------------------|-------------|
-| **Output EA Layer** | Vector (Polygon) | `ea_output.qml` | Consolidated output layer containing all final updated EA polygons (`<geocode>_ea2026`). Styled with vibrant blue borders and automated labels. |
-| **Delineated EAs Layer** | Vector (Polygon) | `ea_output.qml` | Optional output containing sub-polygons generated from delineation (`<geocode>_delineated_ea2026`). |
-| **Merged EAs Layer** | Vector (Polygon) | `ea_output.qml` | Optional output containing EAs generated from merging underpopulated EAs (`<geocode>_merged_ea2026`). |
-| **Boundary Update Lines Layer** | Vector (Line) | `eadel_update_lines.qml` | Line layer (`<geocode>_eadel_update`) representing new boundary cuts generated from road/river splits. |
-| **Candidate for Delineation Layer** | Vector (Polygon) | `delineation_candidates.qml` | Layer containing EAs identified as candidates for delineation (>300 HH). Styled with amber highlight. |
-| **Candidate for Merging Layer** | Vector (Polygon) | `merge_candidates.qml` | Layer containing under-threshold initiator EAs (<=100 HH) and reference neighbor EAs evaluated for intra-barangay merging. |
-### Final Output Attribute Schema (`delineated_ea2026`, `merge_ea2026`, `special_ea`)
+| Output Layer | Sub-Tab Mode | Type | Style File (.qml) | Description |
+|--------------|--------------|------|-------------------|-------------|
+| **Extracted Building Points** | Delineation & Merging | Vector (Point) | `extracted_bldgpts.qml` | Extracted building points with aggregated household counts (`<geocode>_extracted_bldgpts`). Styled with brown symbology for distinct visibility during feature selection. |
+| **Delineated EAs Layer** | Delineation | Vector (Polygon) | `ea_output.qml` | Permanent GeoPackage layer containing candidate EAs evaluated for delineation (`<geocode>_delineated_ea2026.gpkg`). |
+| **Proposed Boundary Cut Lines** | Delineation | Vector (Line) | `eadel_update_lines.qml` | Permanent GeoPackage line layer (`<geocode>_eadel_update.gpkg`) representing proposed boundary cut lines generated from road/river/cluster splits. |
+| **Candidate for Delineation Layer** | Delineation | Vector (Polygon) | `delineation_candidates.qml` | Layer containing EAs identified as candidates for delineation (>300 HH). Styled with amber highlight. |
+| **Merged EAs Layer** | Merging | Vector (Polygon) | `ea_output.qml` | Permanent GeoPackage layer containing EAs generated from merging underpopulated EAs (`<geocode>_merged_ea2026.gpkg`). |
+### Final Output Attribute Schema (`delineated_ea2026`, `merge_ea2026`)
 
-The output layers `<geocode>_delineated_ea2026`, `<geocode>_merged_ea2026`, and `<geocode>_special_ea` share the following 18 standard attributes:
+The output layers `<geocode>_delineated_ea2026` and `<geocode>_merged_ea2026` share the following 18 standard attributes:
 
 | Field Name | Type | Description |
 |------------|------|-------------|
@@ -133,21 +149,8 @@ The output layers `<geocode>_delineated_ea2026`, `<geocode>_merged_ea2026`, and 
 | **new_ean** | String | Newly assigned post-delineation 6-digit EA sequence number code (e.g. `001000`). |
 | **hh_count** | Integer | New total household count aggregated from building points assigned to this polygon (whole number). |
 | **bldg_count** | Integer | New total building point count contained in this polygon. |
-| **ea_type** | String | EA classification and transformation type (`DELINEATED`, `MERGED`, `RETAINED`, `GAP`, `OVERLAP`, or `SPECIAL`). |
-| **remarks** | String | Processing note detailing action or split strategy (e.g. `Split along road network`, `Merged EA`, `Generated from Gap layer`). |
-
-### Special EA `new_ean` Naming Convention
-
-Special EAs (`special_ea` output polygons, resolved gap features, and overlap polygons) in Tab 2 are assigned 6-digit `new_ean` codes (`PPP000`) based on the existing non-special EAs within their parent Barangay:
-
-1. **When Non-Zero Suffixes Exist (`highest_suffix > 0`)**:
-   * If any split/child EA exists in the barangay (e.g., `001004` $\rightarrow \text{highest suffix} = 4$), the Special EA prefix (`PPP`) follows `(highest_suffix + 1)` and suffix (`SSS`) is `"000"`.
-   * *Example*: Highest suffix is `004` $\rightarrow$ Special EA becomes **`005000`**.
-2. **When All Suffixes are Base Zero (`highest_suffix == 0`)**:
-   * If all EAs in the barangay have base suffix `"000"` (e.g. `001000`, `002000`, `003000` $\rightarrow \text{highest prefix} = 3$), the Special EA prefix (`PPP`) follows `(highest_prefix + 1)` and suffix (`SSS`) is `"000"`.
-   * *Example*: Highest prefix is `003` $\rightarrow$ Special EA becomes **`004000`**.
-3. **Multiple Special EAs in Same Barangay**:
-   * Subsequent Special EAs in the same barangay increment sequentially (e.g. `004000`, `005000`, `006000`).
+| **ea_type** | String | EA classification and transformation type (`DELINEATED`, `MERGED`, or `RETAINED`). |
+| **remarks** | String | Processing note detailing action or split strategy (e.g. `Split along road network`, `Merged EA`). |
 
 In addition, the **`merge_ea2026`** (`<geocode>_merged_ea2026`) output layer includes the following 3 additional fields:
 

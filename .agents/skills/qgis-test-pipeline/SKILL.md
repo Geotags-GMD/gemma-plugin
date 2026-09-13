@@ -21,32 +21,45 @@ gemma-plugin/
 │   │   └── sample_data.py          # Spatial vector layer fixture generators (polygons, lines, points)
 │   ├── unit/
 │   │   ├── test_apply_qml_styles.py          # 3 tests — QML style application
-│   │   ├── test_auto_arrange.py              # 6 tests — Auto-arrange layer ordering
+│   │   ├── test_auto_arrange.py              # 8 tests — Auto-arrange layer ordering
+│   │   ├── test_changelog_cleaning.py        # 7 tests — Automated unit test module
 │   │   ├── test_check_and_update_dialog.py   # 2 tests — Check & update dialog
 │   │   ├── test_clip_project_layers.py       # 3 tests — Layer clipping
 │   │   ├── test_create_enumeration_area.py   # 2 tests — EA creation
-│   │   ├── test_ea_merge_processor.py        # 8 tests — EA merge processor
-│   │   ├── test_ea_pipeline.py               # 30 tests — Full EA delineation pipeline
+│   │   ├── test_delineated_ea_threshold.py   # 2 tests — Automated unit test module
+│   │   ├── test_ea_dialog_refresh.py         # 23 tests — Automated unit test module
+│   │   ├── test_ea_merge_processor.py        # 17 tests — EA merge processor
+│   │   ├── test_ea_pipeline.py               # 39 tests — Full EA delineation pipeline
 │   │   ├── test_ea_split_modes.py            # 6 tests — EA split mode strategies
 │   │   ├── test_export_preliminary_polygons.py# 3 tests — Preliminary polygon export
+│   │   ├── test_extracted_bldgpts_symbology.py# 5 tests — Automated unit test module
 │   │   ├── test_fill_polygon_gaps.py         # 3 tests — Gap filling
-│   │   ├── test_gaps_overlaps_checker.py     # 2 tests — Gap & overlap detection
+│   │   ├── test_gaps_overlaps_checker.py     # 3 tests — Gap & overlap detection
 │   │   ├── test_geom_check_repair_legacy.py  # 2 tests — Legacy geometry repair
 │   │   ├── test_geom_repair_toolkit.py       # 3 tests — Topology engine & repair toolkit
 │   │   ├── test_gmdhelpers.py                # 3 tests — Core helper functions
 │   │   ├── test_gsheet.py                    # 1 test — Google Sheets integration
-│   │   ├── test_join_barangay_attributes.py  # 10 tests — Barangay attribute joining
-│   │   ├── test_lgu_fix_processing.py        # 1 test — LGU fix processing
-│   │   ├── test_mbi_validator.py             # 12 tests — MBI validation engine
-│   │   ├── test_package_qfield.py            # 2 tests — QField packaging
+│   │   ├── test_join_barangay_attributes.py  # 11 tests — Barangay attribute joining
+│   │   ├── test_lgu_fix_processing.py        # 4 tests — LGU fix processing
+│   │   ├── test_mbi_run_analysis.py          # 7 tests — Run Analysis MBI reference cases engine
+│   │   ├── test_mbi_validator.py             # 14 tests — MBI validation engine
+│   │   ├── test_merge_preview_threshold_and_individual_merge.py# 11 tests — Automated unit test module
+│   │   ├── test_package_layers_by_citymun.py # 2 tests — Automated unit test module
+│   │   ├── test_package_qfield.py            # 11 tests — QField packaging
+│   │   ├── test_package_style_loader.py      # 5 tests — Automated unit test module
 │   │   ├── test_pre_ea_detector.py           # 10 tests — Automated unit test module
 │   │   ├── test_pre_ea_processor.py          # 7 tests — Pre-EA processor
-│   │   ├── test_psa_lgu_comparison_panel.py  # 2 tests — Automated unit test module
-│   │   ├── test_psa_lgu_map_comparison.py    # 5 tests — Automated unit test module
+│   │   ├── test_projection_finder.py         # 10 tests — Automated unit test module
+│   │   ├── test_psa_lgu_comparison_panel.py  # 6 tests — Automated unit test module
+│   │   ├── test_psa_lgu_map_comparison.py    # 25 tests — Automated unit test module
 │   │   ├── test_repair_geometry_errors.py    # 4 tests — Geometry error repair
 │   │   ├── test_scan_geometry_errors.py      # 3 tests — Geometry error scanning
-│   │   ├── test_update_metadata.py           # 5 tests — Metadata update
-│   │   └── test_update_metadata_by_geocode.py# 2 tests — Geocode metadata update
+│   │   ├── test_split_ea_dialog.py           # 11 tests — Automated unit test module
+│   │   ├── test_tab2_empty_outputs.py        # 5 tests — Automated unit test module
+│   │   ├── test_unmerge_ea.py                # 6 tests — Automated unit test module
+│   │   ├── test_update_metadata.py           # 4 tests — Metadata update
+│   │   ├── test_update_metadata_by_geocode.py# 2 tests — Geocode metadata update
+│   │   └── test_xml_builder.py               # 3 tests — Automated unit test module
 │   │   ├── integration/                # Full spatial integration tests with GeoPackages
 │   ├── run_tests.py                # Unified test runner & reporter (writes test_results.json)
 │   └── test_results.json           # Machine-readable test results (consumed by CI bot)
@@ -58,7 +71,7 @@ gemma-plugin/
         └── test-pr.yml             # QGIS Docker container GitHub Actions PR Gate + Dynamic Comment Bot
 ```
 
-**Current Suite Totals**: **140 tests** across **27 test modules** (91 Passed · 2 Skipped · 0 Failures · 0 Errors)
+**Current Suite Totals**: **296 tests** across **40 test modules** (91 Passed · 2 Skipped · 0 Failures · 0 Errors)
 
 ---
 

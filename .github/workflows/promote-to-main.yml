@@ -111,23 +111,13 @@ jobs:
       # ── 7. Optionally trigger stable release ────────────────────────
       - name: Trigger stable release
         if: inputs.trigger_stable_release == true && success()
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          script: |
-            try {
-              await github.rest.actions.createWorkflowDispatch({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                workflow_id: 'release-stable.yml',
-                ref: 'main',
-                inputs: {
-                  bump_type: '${{ inputs.bump_type }}',
-                  custom_version: ''
-                }
-              });
-              console.log('🚀 Successfully triggered Release Gemma Plugin (Stable) workflow');
-            } catch (err) {
-              console.log('⚠️ Could not trigger stable release:', err.message);
-              core.setFailed('Failed to trigger stable release workflow');
-            }
+        env:
+          GH_TOKEN: ${{ steps.generate-token.outputs.token || secrets.AI_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🚀 Triggering Release Gemma Plugin (Stable) workflow on main..."
+          gh workflow run release-stable.yml \
+            --ref main \
+            -f bump_type="${{ inputs.bump_type }}" \
+            -f custom_version=""
+          echo "✅ Successfully triggered Release Gemma Plugin (Stable) workflow"
+

@@ -20,13 +20,18 @@ features:
   - icon:
       src: /icons/overlap.svg
     title: MBI Checker
-    details: Detect overlaps and gaps between barangay polygon boundaries with building point validation. Supports exporting styled MBI layers as GPKG.
+    details: Detect overlaps and gaps between barangay polygon boundaries with building point validation and reference disputed case exclusion.
     link: /tools/mbi-checker
   - icon:
       src: /icons/mbi_validator.svg
     title: MBI Validator
     details: Cross-check Reference MBI layers against Checker GAP/OVERLAP layers to flag status mismatches and audit boundary resolutions.
     link: /tools/mbi-validator
+  - icon:
+      src: /icons/run_analysis.svg
+    title: Run Analysis
+    details: Perform boundary discrepancy detection across polygon layers and building points, consolidating findings into reference MBI case layers.
+    link: /tools/run-analysis
   - icon:
       src: /icons/fill.svg
     title: Fill Polygon Gaps
@@ -83,6 +88,11 @@ features:
     details: Audit PSA reference boundaries against LGU-submitted polygons using geocodes, global alignment models, and building point validation.
     link: /tools/psa-lgu-comparison
   - icon:
+      src: /icons/projection_finder.svg
+    title: Know Your Projection!
+    details: Diagnose unknown coordinate systems, auto-detect Philippine CRS candidates, and georeference local CAD grids via 2D affine transformations.
+    link: /tools/know-your-projection
+  - icon:
       src: /icons/packager.svg
     title: Package for QField
     details: Package your QGIS project for field data collection using QField with drag-and-drop layer management.
@@ -97,5 +107,15 @@ features:
     title: Clip Project Layers by Extent
     details: Batch clip multiple vector layers to administrative boundary polygons with optional buffer margins.
     link: /tools/clip-project-layers
+  - icon:
+      src: /icons/package_style_loader.svg
+    title: Package Style Loader
+    details: Interactive dialog to organize layer hierarchies, assign functional roles, and apply QML symbology and labeling.
+    link: /tools/package-style-loader
+  - icon:
+      src: /icons/package_layers.svg
+    title: Package Layers by City/Mun
+    details: Split reference boundary layers and building points into clean, self-contained GeoPackage deliverables per city or municipality.
+    link: /tools/package-layers-by-citymun
 ---
 

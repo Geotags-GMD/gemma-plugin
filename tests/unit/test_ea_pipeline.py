@@ -14,6 +14,12 @@ from qgis.core import (
     QgsField,
     QgsVectorLayer,
 )
+from qgis.PyQt.QtCore import QVariant
+
+from references.create_enumeration_area.helpers.constants import (
+    create_qgs_field,
+)
+QgsField = create_qgs_field
 
 from references.create_enumeration_area.helpers.classification import (
     is_delineation_candidate,
@@ -65,11 +71,15 @@ class TestEAPipelineCandidateAndMerge(unittest.TestCase):
         ea_under = {"original_id": 4, "hh_count": 50.0}
         ea_over_not_in_candidate = {"original_id": 5, "hh_count": 400.0}
 
-        # 1. Over-threshold / Max threshold (>= 300) when present in delineation_candidate_ids
+        # 1. Over-threshold / Max threshold (> 300)
         self.assertTrue(is_delineation_candidate(ea_over, max_household=300, eadel_indi_col_idx=-1, full_ea_by_id={}, delineation_candidate_ids=delin_ids))
         self.assertTrue(is_delineation_candidate(ea_exact_max, max_household=300, eadel_indi_col_idx=-1, full_ea_by_id={}, delineation_candidate_ids=delin_ids))
         self.assertFalse(is_delineation_candidate(ea_normal, max_household=300, eadel_indi_col_idx=-1, full_ea_by_id={}, delineation_candidate_ids=delin_ids))
         self.assertFalse(is_delineation_candidate(ea_under, max_household=300, eadel_indi_col_idx=-1, full_ea_by_id={}, delineation_candidate_ids=delin_ids))
+
+        # Direct threshold checks (without candidate_ids override): strictly > max_household
+        self.assertTrue(is_delineation_candidate(ea_over, max_household=300, eadel_indi_col_idx=-1, full_ea_by_id={}, delineation_candidate_ids=None))
+        self.assertFalse(is_delineation_candidate(ea_exact_max, max_household=300, eadel_indi_col_idx=-1, full_ea_by_id={}, delineation_candidate_ids=None))
         
         # Over-threshold EA that is NOT in delineation_candidate_ids must NOT be a delineation candidate
         self.assertFalse(
@@ -1272,7 +1282,6 @@ class TestEAOutputSchemaAndRenaming(unittest.TestCase):
             MERGED_OUTPUT = "MERGED_OUTPUT"
             SPECIAL_EA_OUTPUT = "SPECIAL_EA_OUTPUT"
             DELINEATION_CANDIDATE_OUTPUT = "DELINEATION_CANDIDATE_OUTPUT"
-            MERGE_CANDIDATE_OUTPUT = "MERGE_CANDIDATE_OUTPUT"
             EXTRACTED_BUILDINGS_OUTPUT = "EXTRACTED_BUILDINGS_OUTPUT"
 
         alg = DummyAlg()
@@ -1298,10 +1307,8 @@ class TestEAOutputSchemaAndRenaming(unittest.TestCase):
             "merged_dest_id": "dest_merged",
             "special_ea_dest_id": "dest_special",
             "delin_candidate_dest_id": "dest_delin_cand",
-            "merge_candidate_dest_id": "dest_merge_cand",
             "extracted_buildings_dest_id": "dest_bldg",
             "delin_candidate_feat_count": 0,
-            "merge_candidate_feat_count": 0,
             "extracted_bldg_feat_count": 0,
         }
         p3 = {"road_geoms": {}, "river_geoms": {}}
@@ -1342,7 +1349,6 @@ class TestEAOutputSchemaAndRenaming(unittest.TestCase):
             MERGED_OUTPUT = "MERGED_OUTPUT"
             SPECIAL_EA_OUTPUT = "SPECIAL_EA_OUTPUT"
             DELINEATION_CANDIDATE_OUTPUT = "DELINEATION_CANDIDATE_OUTPUT"
-            MERGE_CANDIDATE_OUTPUT = "MERGE_CANDIDATE_OUTPUT"
             EXTRACTED_BUILDINGS_OUTPUT = "EXTRACTED_BUILDINGS_OUTPUT"
 
         alg = DummyAlg()
@@ -1619,7 +1625,6 @@ class TestEAOutputSchemaAndRenaming(unittest.TestCase):
             MERGED_OUTPUT = "MERGED_OUTPUT"
             SPECIAL_EA_OUTPUT = "SPECIAL_EA_OUTPUT"
             DELINEATION_CANDIDATE_OUTPUT = "DELINEATION_CANDIDATE_OUTPUT"
-            MERGE_CANDIDATE_OUTPUT = "MERGE_CANDIDATE_OUTPUT"
             EXTRACTED_BUILDINGS_OUTPUT = "EXTRACTED_BUILDINGS_OUTPUT"
 
         alg = DummyAlg()
@@ -1736,7 +1741,6 @@ class TestEAOutputSchemaAndRenaming(unittest.TestCase):
             MERGED_OUTPUT = "MERGED_OUTPUT"
             SPECIAL_EA_OUTPUT = "SPECIAL_EA_OUTPUT"
             DELINEATION_CANDIDATE_OUTPUT = "DELINEATION_CANDIDATE_OUTPUT"
-            MERGE_CANDIDATE_OUTPUT = "MERGE_CANDIDATE_OUTPUT"
             EXTRACTED_BUILDINGS_OUTPUT = "EXTRACTED_BUILDINGS_OUTPUT"
 
         fields = QgsFields()
@@ -1808,7 +1812,6 @@ class TestEAOutputSchemaAndRenaming(unittest.TestCase):
             MERGED_OUTPUT = "MERGED_OUTPUT"
             SPECIAL_EA_OUTPUT = "SPECIAL_EA_OUTPUT"
             DELINEATION_CANDIDATE_OUTPUT = "DELINEATION_CANDIDATE_OUTPUT"
-            MERGE_CANDIDATE_OUTPUT = "MERGE_CANDIDATE_OUTPUT"
             EXTRACTED_BUILDINGS_OUTPUT = "EXTRACTED_BUILDINGS_OUTPUT"
 
         fields = QgsFields()
@@ -1880,7 +1883,6 @@ class TestEAOutputSchemaAndRenaming(unittest.TestCase):
             MERGED_OUTPUT = "MERGED_OUTPUT"
             SPECIAL_EA_OUTPUT = "SPECIAL_EA_OUTPUT"
             DELINEATION_CANDIDATE_OUTPUT = "DELINEATION_CANDIDATE_OUTPUT"
-            MERGE_CANDIDATE_OUTPUT = "MERGE_CANDIDATE_OUTPUT"
             EXTRACTED_BUILDINGS_OUTPUT = "EXTRACTED_BUILDINGS_OUTPUT"
 
         fields = QgsFields()
@@ -1926,6 +1928,201 @@ class TestEAOutputSchemaAndRenaming(unittest.TestCase):
         # Highest prefix was 002, suffixes 000 -> Special EA 1 is 003000, Special EA 2 is 004000
         self.assertEqual(spec_sink.features[0].attribute("new_ean"), "003000")
         self.assertEqual(spec_sink.features[1].attribute("new_ean"), "004000")
+
+
+class TestDelineationMinHouseholdEnforcement(unittest.TestCase):
+    """Verify that delineation never outputs EAs below min_household."""
+
+    def test_force_geometric_split_rejects_under_min_household(self):
+        from references.create_enumeration_area.phases.phase5_delineate import force_geometric_split
+
+        poly = QgsGeometry.fromPolygonXY([[
+            QgsPointXY(0, 0), QgsPointXY(10, 0), QgsPointXY(10, 10), QgsPointXY(0, 10), QgsPointXY(0, 0)
+        ]])
+        # Total 130 HH: 110 in bottom half, 20 in top half. min_household = 100.
+        # A split would isolate the 20 HH building, which is < 100 min_household.
+        bldgs = [
+            {'point': QgsPointXY(5, 2), 'pop': 110.0},
+            {'point': QgsPointXY(5, 8), 'pop': 20.0},
+        ]
+        ea = {
+            'geom': poly,
+            'buildings': bldgs,
+            'hh_count': 130.0,
+            'bldg_count': 2,
+            'original_id': 1,
+            'original_code': '001000',
+            'attributes': ['001000'],
+            'parent_barangay': '043404001',
+            'is_special_ea': False,
+        }
+
+        feedback = MockFeedback()
+        result = force_geometric_split(ea, target_pop=100, fback=feedback, min_household=100, max_household=300)
+
+        # Result must NOT contain any EA with hh_count < 100
+        for p in result:
+            self.assertGreaterEqual(p['hh_count'], 100, f"Split produced an EA with {p['hh_count']} HH (< 100)")
+        # Since it cannot produce >= 2 parts each >= 100, it must have preserved whole
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0]['hh_count'], 130.0)
+
+    def test_force_geometric_split_accepts_valid_split_above_min_household(self):
+        from references.create_enumeration_area.phases.phase5_delineate import force_geometric_split
+
+        poly = QgsGeometry.fromPolygonXY([[
+            QgsPointXY(0, 0), QgsPointXY(10, 0), QgsPointXY(10, 10), QgsPointXY(0, 10), QgsPointXY(0, 0)
+        ]])
+        # Total 300 HH: 150 in bottom half, 150 in top half. Both >= min_household (100).
+        bldgs = [
+            {'point': QgsPointXY(5, 2), 'pop': 150.0},
+            {'point': QgsPointXY(5, 8), 'pop': 150.0},
+        ]
+        ea = {
+            'geom': poly,
+            'buildings': bldgs,
+            'hh_count': 300.0,
+            'bldg_count': 2,
+            'original_id': 2,
+            'original_code': '002000',
+            'attributes': ['002000'],
+            'parent_barangay': '043404001',
+            'is_special_ea': False,
+        }
+
+        feedback = MockFeedback()
+        result = force_geometric_split(ea, target_pop=150, fback=feedback, min_household=100, max_household=200)
+
+        self.assertGreaterEqual(len(result), 2)
+        for p in result:
+            self.assertGreaterEqual(p['hh_count'], 100, f"Delineated part has {p['hh_count']} HH (< 100)")
+
+    def test_phase8_output_delineated_sink_skips_under_threshold_from_split(self):
+        from references.create_enumeration_area.phases.phase8_output import run_phase_8
+
+        class MockSink:
+            def __init__(self): self.features = []
+            def addFeature(self, feat, flags=None):
+                self.features.append(feat)
+                return True
+
+        class DummyAlg:
+            DELINEATED_OUTPUT = "DELINEATED_OUTPUT"
+            MERGED_OUTPUT = "MERGED_OUTPUT"
+            SPECIAL_EA_OUTPUT = "SPECIAL_EA_OUTPUT"
+            DELINEATION_CANDIDATE_OUTPUT = "DELINEATION_CANDIDATE_OUTPUT"
+            EXTRACTED_BUILDINGS_OUTPUT = "EXTRACTED_BUILDINGS_OUTPUT"
+
+        fields = QgsFields()
+        for f in ["fid", "map_uuid", "geocode", "region", "province", "city_mun", "barangay", "code", "name", "ean", "hhcount", "bldgcount", "sy", "new_ean", "hh_count", "bldg_count", "ea_type", "remarks", "special_type"]:
+            fields.append(QgsField(f, QVariant.Int if f == "fid" else (QVariant.Double if f == "hhcount" else (QVariant.Int if "count" in f else QVariant.String))))
+
+        delin_sink = MockSink()
+        poly1 = QgsGeometry.fromPolygonXY([[QgsPointXY(0, 0), QgsPointXY(1, 0), QgsPointXY(1, 1), QgsPointXY(0, 1), QgsPointXY(0, 0)]])
+        poly2 = QgsGeometry.fromPolygonXY([[QgsPointXY(1, 0), QgsPointXY(2, 0), QgsPointXY(2, 1), QgsPointXY(1, 1), QgsPointXY(1, 0)]])
+
+        eas = [
+            # Delineated part 1 with valid HH >= 100
+            {'geom': poly1, 'original_id': 1, 'original_code': '001000', 'new_ea_code': '001001', 'parent_barangay': '043404001', 'from_split': True, 'hh_count': 150.0, 'bldg_count': 1, 'buildings': [{'point': QgsPointXY(0.5, 0.5), 'pop': 150.0}]},
+            # Delineated part 2 with under-threshold HH < 100
+            {'geom': poly2, 'original_id': 1, 'original_code': '001000', 'new_ea_code': '001002', 'parent_barangay': '043404001', 'from_split': True, 'hh_count': 50.0, 'bldg_count': 1, 'buildings': [{'point': QgsPointXY(1.5, 0.5), 'pop': 50.0}]},
+        ]
+
+        p1 = {
+            "previous_ea_source": QgsVectorLayer("Polygon?crs=EPSG:4326", "test_ea", "memory"),
+            "building_source": None,
+            "target_crs": QgsVectorLayer("Polygon?crs=EPSG:4326", "test_ea", "memory").crs(),
+            "area_threshold": 1.0, "max_household": 300, "min_household": 100,
+            "bldg_hh_field": "pop", "ea_id_field": "ean", "barangay_by_id": {}, "all_ea_features": [],
+        }
+        p2 = {
+            "out_fields": fields, "export_fields": fields, "special_ea_export_fields": fields,
+            "delineation_candidate_ids": {1}, "merge_candidate_ids": set(), "adjacent_ea_ids": set(),
+            "delineated_sink": delin_sink, "merged_sink": None, "special_ea_sink": None,
+            "special_ea_dest_id": None, "extracted_buildings_sink": None,
+            "delin_candidate_feat_count": 0, "merge_candidate_feat_count": 0, "extracted_bldg_feat_count": 0,
+        }
+        p3 = {"road_geoms": {}, "river_geoms": {}}
+        p4 = {}
+        p7 = {"eas": eas}
+
+        run_phase_8(DummyAlg(), {}, None, MockFeedback(), None, p1, p2, p3, p4, p7)
+
+        # Only the part with hh_count >= 100 should be exported to delineated_sink
+        self.assertEqual(len(delin_sink.features), 1)
+        self.assertEqual(delin_sink.features[0].attribute("hh_count"), 150)
+
+    def test_phase5_generates_proposed_line_without_splitting_ea(self):
+        """Verify that Phase 5 creates proposed boundary cut lines while keeping EA polygon whole."""
+        from unittest.mock import MagicMock
+        from references.create_enumeration_area.phases.phase5_delineate import run_phase_5
+
+        # Create an overpopulated EA with 320 households and 2 building points
+        ea_geom = QgsGeometry.fromPolygonXY([[
+            QgsPointXY(0, 0), QgsPointXY(10, 0), QgsPointXY(10, 10), QgsPointXY(0, 10), QgsPointXY(0, 0)
+        ]])
+        bldgs = [
+            {'point': QgsPointXY(2.0, 5.0), 'pop': 160.0},
+            {'point': QgsPointXY(8.0, 5.0), 'pop': 160.0},
+        ]
+        ea_item = {
+            'geom': ea_geom,
+            'original_id': 101,
+            'original_code': '043404001001',
+            'parent_barangay': '043404001',
+            'hh_count': 320.0,
+            'bldg_count': 2,
+            'buildings': bldgs,
+            'attributes': ['043404001001', 'EA 001', 320.0, 2],
+            'from_split': False,
+            'from_merge': False,
+            'is_special_ea': False,
+        }
+
+        p1 = {
+            "eadel_indi_col_idx": -1,
+            "min_household": 100,
+            "max_household": 300,
+            "target_household": 200,
+            "snap_tolerance": 15.0,
+            "densify_dist": 5.0,
+            "area_threshold": 1.0,
+            "num_cores": 1,
+            "split_strategy": 0,
+            "split_type": 0,
+        }
+        p2 = {
+            "full_ea_by_id": {101: MagicMock()},
+            "delineation_candidate_ids": {101},
+            "merge_candidate_ids": set(),
+            "delineation_candidate_hhdivthres": {101: 2},
+        }
+        p3 = {
+            "road_index": None,
+            "road_geoms": {},
+            "river_index": None,
+            "river_geoms": {},
+        }
+        p4 = {
+            "eas": [ea_item],
+        }
+
+        mock_feedback = MagicMock()
+        mock_feedback.isCanceled.return_value = False
+        res = run_phase_5(MagicMock(), {}, None, mock_feedback, mock_feedback, p1, p2, p3, p4)
+
+        # 1. EA polygon should NOT be replaced by multiple split pieces
+        split_eas = res["split_eas"]
+        self.assertEqual(len(split_eas), 1, "Parent EA should be preserved as 1 whole polygon")
+        self.assertEqual(split_eas[0]["original_id"], 101)
+        self.assertTrue(split_eas[0].get("has_proposed_split"))
+        self.assertEqual(split_eas[0].get("remarks"), "Proposed for delineation")
+
+        # 2. Proposed line should be generated in proposed_lines
+        proposed_lines = res.get("proposed_lines", [])
+        self.assertEqual(len(proposed_lines), 1, "Must generate 1 proposed boundary line")
+        self.assertEqual(proposed_lines[0]["ea_id"], 101)
+        self.assertFalse(proposed_lines[0]["geom"].isEmpty())
 
 
 if __name__ == "__main__":

@@ -53,6 +53,8 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QVariant
 
+from .helpers.constants import create_qgs_field
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -592,20 +594,20 @@ class PreEAProcessor:
                 break
 
         if ean_field_name is None:
-            fields.append(QgsField("ean", QVariant.String))
+            fields.append(create_qgs_field("ean", QVariant.String))
             existing_names.append("ean")
             ean_field_name = "ean"
 
         if "hhcount" not in existing_names and "hh_count" not in existing_names:
-            fields.append(QgsField("hhcount", QVariant.Double))
+            fields.append(create_qgs_field("hhcount", QVariant.Double))
             existing_names.append("hhcount")
 
         if "bldgcount" not in existing_names and "bldg_count" not in existing_names:
-            fields.append(QgsField("bldgcount", QVariant.Int))
+            fields.append(create_qgs_field("bldgcount", QVariant.Int))
             existing_names.append("bldgcount")
 
         if "sy" not in existing_names:
-            fields.append(QgsField("sy", QVariant.String))
+            fields.append(create_qgs_field("sy", QVariant.String))
             existing_names.append("sy")
 
         dp.addAttributes(fields)
@@ -1628,11 +1630,11 @@ class PreEAProcessor:
 
         existing_names = [fields_to_add.at(i).name().lower() for i in range(fields_to_add.count())]
         if "hhcount" not in existing_names:
-            fields_to_add.append(QgsField("hhcount", QVariant.Double))
+            fields_to_add.append(create_qgs_field("hhcount", QVariant.Double))
         if "bldgcount" not in existing_names:
-            fields_to_add.append(QgsField("bldgcount", QVariant.Int))
+            fields_to_add.append(create_qgs_field("bldgcount", QVariant.Int))
         if "sy" not in existing_names:
-            fields_to_add.append(QgsField("sy", QVariant.String))
+            fields_to_add.append(create_qgs_field("sy", QVariant.String))
 
         dp.addAttributes(fields_to_add)
         output_layer.updateFields()

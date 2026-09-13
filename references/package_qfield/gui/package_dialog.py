@@ -46,8 +46,8 @@ from libqfieldsync.project import ProjectConfiguration
 from libqfieldsync.project_checker import ProjectChecker
 from libqfieldsync.utils.file_utils import fileparts
 from libqfieldsync.utils.qgis import get_project_title
-from qgis.core import Qgis, QgsApplication, QgsProject, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsVectorLayer, QgsRasterLayer, QgsVectorFileWriter, QgsTask, QgsTaskManager, QgsSnappingConfig, QgsTolerance, QgsGeometry, QgsFeatureRequest, QgsCoordinateTransform, QgsMapLayer
-from qgis.PyQt.QtCore import QDir, Qt, QUrl, QTimer, QEvent
+from qgis.core import Qgis, QgsApplication, QgsProject, QgsLayerTreeGroup, QgsLayerTreeLayer, QgsVectorLayer, QgsRasterLayer, QgsVectorFileWriter, QgsTask, QgsTaskManager, QgsSnappingConfig, QgsTolerance, QgsGeometry, QgsFeatureRequest, QgsCoordinateTransform, QgsMapLayer, NULL
+from qgis.PyQt.QtCore import QDir, Qt, QUrl, QTimer, QEvent, QVariant
 from qgis.PyQt.QtGui import QIcon, QBrush, QPixmap, QImage, QPainter
 from qgis.PyQt.QtSvg import QSvgRenderer
 from qgis.PyQt.QtWidgets import QApplication, QDialog, QDialogButtonBox, QMessageBox, QLabel, QListWidget, QListWidgetItem, QWidget, QHBoxLayout, QPushButton, QComboBox, QGridLayout, QGroupBox, QSizePolicy, QScrollArea, QFrame, QVBoxLayout, QCheckBox, QTableWidget, QTableWidgetItem, QHeaderView, QTreeWidget, QTreeWidgetItem, QTabWidget, QLineEdit, QInputDialog, QFileDialog, QToolButton, QAbstractItemView
@@ -2587,29 +2587,23 @@ class PackageDialog(QDialog, DialogUi):
         Returns a dict of original actions so they can be restored.
         """
         project = QgsProject.instance()
-        assigned_layer_ids = set()
+        tree_checked_layer_ids = set()
+        tree_unchecked_layer_ids = set()
         
-        # 1. Group Panel (LayerGroupsTreeWidget)
+        # 1. Group Panel (LayerGroupsTreeWidget) - traverse recursively
         if hasattr(self, 'layer_groups_tree'):
+            def collect_tree_states(item):
+                lid = item.data(0, Qt.UserRole)
+                if lid:
+                    if item.checkState(0) == Qt.Checked:
+                        tree_checked_layer_ids.add(lid)
+                    else:
+                        tree_unchecked_layer_ids.add(lid)
+                for i in range(item.childCount()):
+                    collect_tree_states(item.child(i))
+
             for i in range(self.layer_groups_tree.topLevelItemCount()):
-                group_item = self.layer_groups_tree.topLevelItem(i)
-                if group_item.checkState(0) != Qt.Checked:
-                    continue
-                for j in range(group_item.childCount()):
-                    layer_item = group_item.child(j)
-                    if layer_item.checkState(0) == Qt.Checked:
-                        active_name = self._get_active_layer_name(layer_item)
-                        if not active_name or active_name == self.tr("— None —"):
-                            continue
-                        combo = self.layer_groups_tree.itemWidget(layer_item, 1)
-                        layer_id = layer_item.data(0, Qt.UserRole)
-                        if layer_id:
-                            assigned_layer_ids.add(layer_id)
-                        else:
-                            layers_by_name = project.mapLayersByName(active_name)
-                            if layers_by_name:
-                                assigned_layer_ids.add(layers_by_name[0].id())
-                                
+                collect_tree_states(self.layer_groups_tree.topLevelItem(i))
 
         # 3. Raster Configuration
         if hasattr(self, 'raster_table'):
@@ -2618,7 +2612,7 @@ class PackageDialog(QDialog, DialogUi):
                 if chk_item and chk_item.checkState() == Qt.Checked:
                     layer_id = chk_item.data(Qt.UserRole)
                     if layer_id:
-                        assigned_layer_ids.add(layer_id)
+                        tree_checked_layer_ids.add(layer_id)
 
         # 4. Per-layer Data Source Configuration
         settings = QSettings()
@@ -2627,7 +2621,7 @@ class PackageDialog(QDialog, DialogUi):
             layer_ds_policies = json.loads(layer_ds_json)
             if isinstance(layer_ds_policies, dict):
                 for layer_id in layer_ds_policies.keys():
-                    assigned_layer_ids.add(layer_id)
+                    tree_checked_layer_ids.add(layer_id)
         except Exception:
             pass
                         
@@ -2651,11 +2645,25 @@ class PackageDialog(QDialog, DialogUi):
 
             if is_generated_img:
                 layer.setCustomProperty("QFieldSync/action", "copy")
-            elif layer.id() not in assigned_layer_ids:
-                fields = layer.fields() if hasattr(layer, 'fields') else None
-                if fields and (fields.indexOf("ea_geocode") != -1 or fields.indexOf("geocode") != -1):
+            elif layer.id() in tree_checked_layer_ids:
+                # Explicitly checked in the layer groups tree -> package layer
+                if not layer.customProperty("QFieldSync/action"):
                     layer.setCustomProperty("QFieldSync/action", "copy")
-                    # Temporarily strip leading digits + '_' so OfflineConverter does not duplicate code in filename
+            elif layer.id() in tree_unchecked_layer_ids:
+                # Explicitly unchecked in the layer groups tree -> skip packaging
+                layer.setCustomProperty("QFieldSync/action", "no_action")
+            else:
+                # Not explicitly in tree -> check for geocode attributes
+                field_names = [f.name().strip().lower() for f in layer.fields()] if hasattr(layer, 'fields') else []
+                known_geocodes = (
+                    "ea_geocode", "eageocode", "geocode", "ea_code", "eacode",
+                    "bgy_code", "bgycode", "bsn_geoid", "ean", "new_ean", "new_ea",
+                    "code", "psgc", "bgy_geocode", "correspondence_ea_geocode",
+                    "brgy_code", "barangay_code"
+                )
+                has_any_geocode = any(k in field_names for k in known_geocodes)
+                if has_any_geocode:
+                    layer.setCustomProperty("QFieldSync/action", "copy")
                     orig_name = layer.name()
                     m = re.match(r"^\d+_(.+)$", orig_name)
                     if m:
@@ -2825,6 +2833,11 @@ class PackageDialog(QDialog, DialogUi):
         )
         self.dirsToCopyWidget.save_settings()
         self._ensure_ea_update_not_offline_and_writable()
+
+        # Ensure all unassigned layers are filtered to this geocode before packaging
+        is_ea_mode = self.output_dropdown.currentText() == self.tr("EA Level")
+        for _unassigned_lyr in self._get_unassigned_map_layers():
+            self._filter_unassigned_layer(_unassigned_lyr, code_digits, is_ea_level=is_ea_mode)
 
         # In batch mode, old generated rasters from previous iterations may
         # still be loaded and get copied again. Keep only the current raster.
@@ -3264,8 +3277,18 @@ class PackageDialog(QDialog, DialogUi):
                     "GMD Pipeline",
                     Qgis.Warning,
                 )
-
-
+            try:
+                # Ensure unassigned layers are filtered right before export
+                is_ea_mode = self.output_dropdown.currentText() == self.tr("EA Level")
+                for _unassigned_lyr in self._get_unassigned_map_layers():
+                    self._filter_unassigned_layer(_unassigned_lyr, code_digits, is_ea_level=is_ea_mode)
+                self._export_individual_layers(code_digits, subfolder_path, packaged_project_file)
+            except Exception as e:
+                QgsApplication.instance().messageLog().logMessage(
+                    f"Could not export individual layers for {code_digits}: {e}",
+                    "GMD Pipeline",
+                    Qgis.Warning,
+                )
 
             self.do_post_offline_convert_action(True)
         except PackagingCanceledError:
@@ -3747,16 +3770,6 @@ class PackageDialog(QDialog, DialogUi):
                         checked.append(ea.text(0).split('_')[0])
         return checked
 
-    def _get_checked_bgy_geocodes(self):
-        checked = []
-        for i in range(self._filter_tree_widget.topLevelItemCount()):
-            city = self._filter_tree_widget.topLevelItem(i)
-            for j in range(city.childCount()):
-                bgy = city.child(j)
-                if bgy.checkState(0) == Qt.Checked:
-                    checked.append(bgy.text(0).split('_')[0])
-        return checked
-
     def _populate_filter_tree(self):
         """Fill the Tree filter with City/Municipalities as parents and Barangays/EAs as children."""
         if not hasattr(self, '_filter_tree_widget'):
@@ -4185,6 +4198,9 @@ class PackageDialog(QDialog, DialogUi):
         if not hasattr(self, 'layer_groups_tree'):
             return []
 
+        if self.layer_groups_tree.topLevelItemCount() == 0 and hasattr(self, '_update_layer_assignment_ui'):
+            self._update_layer_assignment_ui()
+
         assigned_layer_ids = set()
 
         def collect_assigned(item):
@@ -4201,7 +4217,7 @@ class PackageDialog(QDialog, DialogUi):
 
         unassigned_layers = []
         for lyr in QgsProject.instance().mapLayers().values():
-            if isinstance(lyr, QgsVectorLayer) and lyr.id() not in assigned_layer_ids:
+            if isinstance(lyr, QgsVectorLayer) and lyr.isValid() and lyr.id() not in assigned_layer_ids:
                 unassigned_layers.append(lyr)
 
         return unassigned_layers
@@ -4284,28 +4300,19 @@ class PackageDialog(QDialog, DialogUi):
             except Exception as e:
                 print(f"Could not update QGZ zip entries for duplicate code cleanup: {e}")
 
-    def _filter_unassigned_layer(self, layer, target_geocode, is_ea_level, missing_field_warnings=None):
-        """Filter an unassigned layer based on ea_geocode / geocode fields."""
+    def _filter_unassigned_layer(self, layer, target_geocode, is_ea_level):
+        """Filter an unassigned layer based on target geocode level.
+        
+        - Barangay Level: Filters on "geocode" column using LIKE '<bgy_prefix>%' (e.g. "geocode" LIKE '01728001%').
+        - EA Level: Filters on "ea_geocode" column using exact match (e.g. "ea_geocode" = '01716010001001').
+        - No other columns will be detected or used as fallbacks.
+        - If the target column is missing, leaves the layer unfiltered (clears any stale subset string).
+        """
         if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
             return
 
         if layer.isEditable():
             layer.rollBack()
-
-        layer_name = self._normalized_layer_name(layer.name()).strip()
-
-        fields = layer.fields()
-        has_ea_geocode = fields.indexOf("ea_geocode") != -1
-        has_geocode = fields.indexOf("geocode") != -1
-
-        if not has_ea_geocode and not has_geocode:
-            warning_msg = f"Layer '{layer.name()}' is missing both 'ea_geocode' and 'geocode' fields."
-            if missing_field_warnings is not None:
-                if warning_msg not in missing_field_warnings:
-                    missing_field_warnings.append(warning_msg)
-            else:
-                QMessageBox.warning(self, "Missing Geocode Fields", warning_msg)
-            return
 
         raw_geocode = str(target_geocode).split('_', 1)[0].strip() if target_geocode else ""
         if raw_geocode.isdigit():
@@ -4322,18 +4329,29 @@ class PackageDialog(QDialog, DialogUi):
 
         bgy_prefix = clean_target_geocode[:8] if clean_target_geocode else ""
 
+        # Build case-insensitive field mapping: lowercase_name -> (actual_name, index, field_obj)
+        field_map = {}
+        for i, fld in enumerate(layer.fields()):
+            field_map[fld.name().strip().lower()] = (fld.name(), i, fld)
+
         if is_ea_level:
-            # EA Level: "ea_geocode" = '01732003001001'
-            if has_ea_geocode:
-                layer.setSubsetString(f"\"ea_geocode\" = '{clean_target_geocode}'")
+            # -------------------------------------------------------------
+            # EA Level (14 digits) -> "ea_geocode" = '01716010001001'
+            # -------------------------------------------------------------
+            if "ea_geocode" in field_map:
+                actual_name = field_map["ea_geocode"][0]
+                layer.setSubsetString(f"\"{actual_name}\" = '{clean_target_geocode}'")
             else:
-                layer.setSubsetString(f"\"geocode\" = '{clean_target_geocode}'")
+                layer.setSubsetString("")
         else:
-            # Barangay Level: "geocode" LIKE '01732003%'
-            if has_geocode:
-                layer.setSubsetString(f"\"geocode\" LIKE '{bgy_prefix}%'")
+            # -------------------------------------------------------------
+            # Barangay Level (8 digits) -> "geocode" LIKE '01728001%'
+            # -------------------------------------------------------------
+            if "geocode" in field_map:
+                actual_name = field_map["geocode"][0]
+                layer.setSubsetString(f"\"{actual_name}\" LIKE '{bgy_prefix}%'")
             else:
-                layer.setSubsetString(f"\"ea_geocode\" LIKE '{bgy_prefix}%'")
+                layer.setSubsetString("")
 
         layer.setCustomProperty("QFieldSync/action", "copy")
 
@@ -4382,29 +4400,10 @@ class PackageDialog(QDialog, DialogUi):
                 # Last resort: geocode prefix match
                 lyr.setSubsetString(f"substr(\"geocode\", 1, 8) = '{bgy_prefix}'")
 
-        # ea_update: keep unfiltered
-        for lyr in QgsProject.instance().mapLayers().values():
-            if not isinstance(lyr, QgsVectorLayer) or not lyr.isValid():
-                continue
-            if self._normalized_layer_name(lyr.name()).lower().endswith("_ea_update"):
-                lyr.setSubsetString("")
-
         # Filter unassigned layers
-        missing_warnings = []
         unassigned_layers = self._get_unassigned_map_layers()
         for lyr in unassigned_layers:
-            if self._normalized_layer_name(lyr.name()).lower().endswith("_ea_update"):
-                lyr.setSubsetString("")
-                continue
-            self._filter_unassigned_layer(lyr, ea_geocode, is_ea_level=True, missing_field_warnings=missing_warnings)
-
-        if missing_warnings:
-            QMessageBox.warning(
-                self,
-                "Missing Geocode Fields",
-                "The following unassigned layers are missing both 'ea_geocode' and 'geocode' fields:\n\n"
-                + "\n".join(f"  • {w}" for w in missing_warnings)
-            )
+            self._filter_unassigned_layer(lyr, ea_geocode, is_ea_level=True)
 
         # Optional linear layers: select by location against the bgy layer
         linear_layers = [l for l in (road_layer, river_layer, bridge_layer, railroad_layer) if l]
@@ -4512,455 +4511,6 @@ class PackageDialog(QDialog, DialogUi):
 
         QgsProject.instance().write()
 
-    def _export_individual_layers(self, code_digits, subfolder_path, packaged_project_file):
-        """Generic method to export selected layers individually and update the QGZ project."""
-        if not hasattr(self, 'data_sources_table'):
-            return
-            
-        project_path = str(packaged_project_file)
-        if not os.path.exists(project_path):
-            return
-
-        export_configs = []
-        for row in range(self.data_sources_table.rowCount()):
-            name_item = self.data_sources_table.item(row, 0)
-            combo = self.data_sources_table.cellWidget(row, 5)
-            if not name_item or not combo:
-                continue
-                
-            target_ext = combo.currentText()
-            if target_ext == self.tr("(data.gpkg)"):
-                continue
-                
-            layer_id = name_item.data(Qt.UserRole)
-            layer_name = name_item.text()
-            
-            # Suffix is extracted starting from the 1st '_' in layer_name
-            if "_" in layer_name:
-                idx = layer_name.find("_")
-                suffix = layer_name[idx:]
-            else:
-                suffix = ""
-
-            target_filename = f"{code_digits}{suffix}{target_ext}"
-            target_name = f"{code_digits}{suffix}"
-            
-            export_configs.append({
-                "layer_id": layer_id,
-                "layer_name": layer_name,
-                "target_ext": target_ext,
-                "target_filename": target_filename,
-                "target_name": target_name
-            })
-
-        
-        # Collect layer visibility preferences from the Layer Assignment panel.
-        # Each role combo has a companion _visible checkbox (e.g. _ea_combo_bgy_visible).
-        # Maps layer_id -> bool (True = visible, False = hidden)
-        visibility_map = {}
-        if not export_configs:
-            return
-
-        qgs_text_cached = None
-        qgs_name_in_zip = None
-        if project_path.lower().endswith(".qgz"):
-            try:
-                with zipfile.ZipFile(project_path, "r") as zin:
-                    all_names = zin.namelist()
-                    qgs_name_in_zip = next((n for n in all_names if n.lower().endswith(".qgs")), None)
-                    if not qgs_name_in_zip: return
-                    qgs_text_cached = zin.read(qgs_name_in_zip).decode("utf-8", errors="ignore")
-            except Exception:
-                return
-        else:
-            try:
-                with open(project_path, "r", encoding="utf-8", errors="ignore") as f:
-                    qgs_text_cached = f.read()
-            except Exception:
-                return
-
-        try:
-            root_xml = ET.fromstring(qgs_text_cached)
-        except Exception:
-            return
-
-        changed_xml = False
-        files_to_delete = set()
-        # Track which XML maplayer IDs have already been claimed by a config,
-        # so that when two configs share the same display name (e.g. both
-        # "{geocode}" but different formats) the name-based fallback does not
-        # match the same XML element twice.
-        processed_ml_ids = set()
-        
-        for config in export_configs:
-            original_ds = None
-            ds_el_to_update = None
-            matched_xml_id = None
-            
-            # --- 1. Try matching by layer ID (exact or substring) ---
-            for ml in root_xml.findall(".//maplayer"):
-                id_el = ml.find("id")
-                if id_el is not None:
-                    xml_id = id_el.text or ""
-                    if xml_id in processed_ml_ids:
-                        continue
-                    if xml_id == config["layer_id"] or config["layer_id"] in xml_id:
-                        ds_el = ml.find("datasource")
-                        if ds_el is not None:
-                            original_ds = (ds_el.text or "").strip()
-                            ds_el_to_update = ds_el
-                            matched_xml_id = xml_id
-                        break
-                    
-            # --- 2. Fallback: match by layer name (skip already-claimed) ---
-            if not original_ds:
-                resolved_name = config["layer_name"].replace("{geocode}", code_digits)
-                orig_layer = QgsProject.instance().mapLayer(config["layer_id"])
-                orig_name = orig_layer.name() if orig_layer else ""
-                orig_name_norm = self._normalized_layer_name(orig_name) if orig_name else ""
-                
-                for ml in root_xml.findall(".//maplayer"):
-                    id_el = ml.find("id")
-                    xml_id = (id_el.text or "") if id_el is not None else ""
-                    if xml_id in processed_ml_ids:
-                        continue
-                    name_el = ml.find("layername")
-                    if name_el is not None:
-                        current_name = (name_el.text or "").strip()
-                        if current_name in (resolved_name, orig_name, orig_name_norm):
-                            ds_el = ml.find("datasource")
-                            if ds_el is not None:
-                                original_ds = (ds_el.text or "").strip()
-                                ds_el_to_update = ds_el
-                                matched_xml_id = xml_id
-                            break
-
-            # --- 3. Fallback: match by datasource content (placeholder names) ---
-            # This is the most reliable strategy because it does not depend on
-            # layer IDs (which OfflineConverter may regenerate) or layer names
-            # (which _rename_and_regroup_layers may have already changed).
-            if not original_ds:
-                _DS_PLACEHOLDERS = ("pppmmbbbeeeeee", "pppmmbbb", "pppmm")
-                for ml in root_xml.findall(".//maplayer"):
-                    id_el = ml.find("id")
-                    xml_id = (id_el.text or "") if id_el is not None else ""
-                    if xml_id in processed_ml_ids:
-                        continue
-                    ds_el = ml.find("datasource")
-                    if ds_el is not None:
-                        ds_val = (ds_el.text or "").strip()
-                        if any(ph in ds_val.lower() for ph in _DS_PLACEHOLDERS):
-                            original_ds = ds_val
-                            ds_el_to_update = ds_el
-                            matched_xml_id = xml_id
-                            break
-
-            if not original_ds:
-                continue
-
-            pipe_pos = original_ds.find("|")
-            file_part = original_ds[:pipe_pos].strip() if pipe_pos != -1 else original_ds
-            uri_extras = original_ds[pipe_pos:] if pipe_pos != -1 else ""
-            
-            qgz_dir = str(subfolder_path)
-            if not os.path.isabs(file_part):
-                file_part = os.path.normpath(os.path.join(qgz_dir, file_part))
-                
-            use_original = False
-            if file_part.lower().endswith(('.shp', '.geojson')):
-                use_original = True
-                
-            temp_lyr = None
-            if use_original:
-                temp_lyr = QgsProject.instance().mapLayer(config["layer_id"])
-                
-            # If we don't have the original layer, we must read from the file.
-            # So the file must exist on disk.
-            if (not temp_lyr or not temp_lyr.isValid()) and not os.path.exists(file_part):
-                continue
-
-            target_path = os.path.join(qgz_dir, config["target_filename"])
-            
-            if not temp_lyr or not temp_lyr.isValid():
-                full_uri = file_part + uri_extras
-                temp_lyr = QgsVectorLayer(full_uri, "temp_export", "ogr")
-                
-            if not temp_lyr.isValid():
-                continue
-
-            options = QgsVectorFileWriter.SaveVectorOptions()
-            options.fileEncoding = "UTF-8"
-            
-            if config["target_ext"] == ".geojson":
-                options.driverName = "GeoJSON"
-            elif config["target_ext"] == ".shp":
-                options.driverName = "ESRI Shapefile"
-            elif config["target_ext"] == ".gpkg":
-                options.driverName = "GPKG"
-                options.layerName = config["target_name"]
-            
-            write_error = QgsVectorFileWriter.NoError
-            try:
-                result = QgsVectorFileWriter.writeAsVectorFormatV2(
-                    temp_lyr, target_path,
-                    QgsProject.instance().transformContext(), options,
-                )
-                write_error = result[0]
-            except Exception:
-                write_error = QgsVectorFileWriter.ErrCreateDataSource
-            finally:
-                del temp_lyr
-
-            if write_error == QgsVectorFileWriter.NoError:
-                if config["target_ext"] == ".gpkg":
-                    new_ds = f"{config['target_filename']}|layername={config['target_name']}"
-                else:
-                    new_ds = f"{config['target_filename']}"
-                ds_el_to_update.text = new_ds
-                changed_xml = True
-                
-                # Mark this XML maplayer as claimed and config as applied
-                if matched_xml_id:
-                    processed_ml_ids.add(matched_xml_id)
-                config["_applied"] = True
-                
-                # Rename the layer in the QGZ XML using the matched ID and ensure provider is ogr
-                if matched_xml_id:
-                    for ml in root_xml.findall(".//maplayer"):
-                        id_el = ml.find("id")
-                        if id_el is not None and id_el.text == matched_xml_id:
-                            layername_el = ml.find("layername")
-                            if layername_el is not None:
-                                layername_el.text = config["target_name"]
-                            title_el = ml.find("title")
-                            if title_el is not None:
-                                title_el.text = config["target_name"]
-                            provider_el = ml.find("provider")
-                            if provider_el is not None:
-                                provider_el.text = "ogr"
-                            break
-                
-                # Rename in layer-tree-layer using matched ID
-                renamed_ltl = False
-                if matched_xml_id:
-                    for ltl in root_xml.findall(".//layer-tree-layer"):
-                        ltl_id = ltl.get("id", "")
-                        if ltl_id == matched_xml_id:
-                            ltl.set("name", config["target_name"])
-                            renamed_ltl = True
-                            break
-                
-                if not renamed_ltl:
-                    # Fallback: try original ID or name
-                    for ltl in root_xml.findall(".//layer-tree-layer"):
-                        ltl_id = ltl.get("id", "")
-                        if ltl_id == config["layer_id"] or config["layer_id"] in ltl_id:
-                            ltl.set("name", config["target_name"])
-                            renamed_ltl = True
-                            break
-                
-                if not renamed_ltl:
-                    resolved_name = config["layer_name"].replace("{geocode}", code_digits)
-                    for ltl in root_xml.findall(".//layer-tree-layer"):
-                        if ltl.get("name", "") == resolved_name:
-                            ltl.set("name", config["target_name"])
-                            break
-                
-                # Mark original file for deletion if it's in the export dir, is not the target, and is a single-layer file type
-                qgz_dir_norm = os.path.normcase(qgz_dir)
-                file_part_norm = os.path.normcase(file_part)
-                target_path_norm = os.path.normcase(target_path)
-                if file_part_norm.startswith(qgz_dir_norm) and file_part_norm != target_path_norm:
-                    if file_part_norm.endswith(('.shp', '.geojson')):
-                        files_to_delete.add(file_part)
-
-        # ---------------------------------------------------------------
-        # FINAL SWEEP: catch any maplayers whose datasource was NOT
-        # updated by the main loop (e.g. OfflineConverter regenerated
-        # the layer ID so neither ID-match nor name-match succeeded).
-        # We detect them by checking if the datasource still references
-        # a placeholder template file (pppmmbbbeeeeee / pppmmbbb / pppmm).
-        # ---------------------------------------------------------------
-        _PLACEHOLDERS = ("pppmmbbbeeeeee", "pppmmbbb", "pppmm")
-        remaining_configs = [c for c in export_configs if c.get("_applied") is not True]
-        
-        if remaining_configs:
-            for ml in root_xml.findall(".//maplayer"):
-                ds_el = ml.find("datasource")
-                if ds_el is None:
-                    continue
-                ds_text = (ds_el.text or "").strip().lower()
-                if not ds_text:
-                    continue
-
-                # Check if datasource still references a template name
-                has_placeholder = any(ph in ds_text for ph in _PLACEHOLDERS)
-                if not has_placeholder:
-                    continue
-
-                id_el = ml.find("id")
-                xml_id = (id_el.text or "") if id_el is not None else ""
-                if xml_id in processed_ml_ids:
-                    continue
-
-                # Find the best matching unapplied config for this maplayer
-                matched_config = None
-                for cfg in remaining_configs:
-                    if cfg.get("_applied"):
-                        continue
-                    matched_config = cfg
-                    break
-
-                if not matched_config:
-                    break
-
-                # Write the export file from the original project layer
-                qgz_dir = str(subfolder_path)
-                target_path = os.path.join(qgz_dir, matched_config["target_filename"])
-
-                orig_lyr = QgsProject.instance().mapLayer(matched_config["layer_id"])
-                if not orig_lyr or not orig_lyr.isValid():
-                    continue
-
-                options = QgsVectorFileWriter.SaveVectorOptions()
-                options.fileEncoding = "UTF-8"
-                if matched_config["target_ext"] == ".geojson":
-                    options.driverName = "GeoJSON"
-                elif matched_config["target_ext"] == ".shp":
-                    options.driverName = "ESRI Shapefile"
-                elif matched_config["target_ext"] == ".gpkg":
-                    options.driverName = "GPKG"
-                    options.layerName = matched_config["target_name"]
-
-                write_ok = False
-                try:
-                    result = QgsVectorFileWriter.writeAsVectorFormatV2(
-                        orig_lyr, target_path,
-                        QgsProject.instance().transformContext(), options,
-                    )
-                    write_ok = (result[0] == QgsVectorFileWriter.NoError)
-                except Exception:
-                    pass
-
-                if not write_ok:
-                    continue
-
-                # Update datasource in XML
-                if matched_config["target_ext"] == ".gpkg":
-                    ds_el.text = f"{matched_config['target_filename']}|layername={matched_config['target_name']}"
-                else:
-                    ds_el.text = matched_config["target_filename"]
-                changed_xml = True
-
-                # Rename layername / title
-                layername_el = ml.find("layername")
-                if layername_el is not None:
-                    layername_el.text = matched_config["target_name"]
-                title_el = ml.find("title")
-                if title_el is not None:
-                    title_el.text = matched_config["target_name"]
-                provider_el = ml.find("provider")
-                if provider_el is not None:
-                    provider_el.text = "ogr"
-
-                # Rename layer-tree-layer
-                if xml_id:
-                    for ltl in root_xml.findall(".//layer-tree-layer"):
-                        if ltl.get("id", "") == xml_id:
-                            ltl.set("name", matched_config["target_name"])
-                            break
-
-                if xml_id:
-                    processed_ml_ids.add(xml_id)
-                matched_config["_applied"] = True
-
-
-
-        if changed_xml:
-            patched_text = ET.tostring(root_xml, encoding="unicode")
-            if project_path.lower().endswith(".qgz"):
-                tmp_path = project_path + ".gentmp"
-                try:
-                    with zipfile.ZipFile(project_path, "r") as zin:
-                        all_names = zin.namelist()
-                        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zout:
-                            for name in all_names:
-                                zout.writestr(
-                                    name,
-                                    patched_text.encode("utf-8") if name == qgs_name_in_zip else zin.read(name),
-                                )
-                    os.replace(tmp_path, project_path)
-                except Exception:
-                    pass
-            else:
-                try:
-                    with open(project_path, "w", encoding="utf-8") as f:
-                        f.write(patched_text)
-                except Exception:
-                    pass
-
-        # Build a set of datasources still in use so we never delete a
-        # file that a maplayer still references (can happen when two layers
-        # share the same source but only one was re-exported).
-        still_referenced = set()
-        for ml in root_xml.findall(".//maplayer"):
-            ds_el = ml.find("datasource")
-            if ds_el is not None:
-                ds_text = (ds_el.text or "").strip()
-                pipe_pos = ds_text.find("|")
-                fp = ds_text[:pipe_pos].strip() if pipe_pos != -1 else ds_text
-                if not os.path.isabs(fp):
-                    fp = os.path.normpath(os.path.join(str(subfolder_path), fp))
-                still_referenced.add(os.path.normcase(fp))
-
-        # Clean up old copied shapefiles/geojsons that were re-exported
-        for f in files_to_delete:
-            # Skip deletion if any maplayer still references this file
-            if os.path.normcase(f) in still_referenced:
-                continue
-            if f.lower().endswith('.shp'):
-                src_stem = os.path.splitext(f)[0]
-                sidecar_exts = [".shp", ".dbf", ".shx", ".prj", ".cpg",
-                                ".qix", ".sbn", ".sbx", ".atx", ".fbn", ".fbx",
-                                ".ain", ".aih", ".ixs", ".mxs", ".shp.xml"]
-                import time
-                for ext in sidecar_exts:
-                    try:
-                        sidecar = src_stem + ext
-                        if os.path.exists(sidecar):
-                            # Handle potential windows file lock
-                            try:
-                                os.remove(sidecar)
-                            except PermissionError:
-                                time.sleep(0.5)
-                                try:
-                                    os.remove(sidecar)
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-            else:
-                try:
-                    if os.path.exists(f):
-                        try:
-                            os.remove(f)
-                        except PermissionError:
-                            time.sleep(0.5)
-                            os.remove(f)
-                except Exception:
-                    pass
-
-    def _copy_additional_raster_and_patch_visibility(self, code_digits, subfolder_path, packaged_project_file):
-        """Patch raster layer visibility in the packaged project.
-
-        The additional raster is now loaded into the QGIS project before
-        OfflineConverter runs, so the maplayer XML is generated automatically.
-        This method only patches the checked/unchecked state in the QGZ for
-        both the satellite raster and the additional raster.
-        """
-        pass
-
-
     def _package_ea_single(self, ea_geocode, export_folder):
         """Run OfflineConverter to package the project for one EA geocode.
 
@@ -5023,6 +4573,10 @@ class PackageDialog(QDialog, DialogUi):
         self.qfield_preferences.set_value("exportDirectoryProject", str(subfolder_path))
         self.dirsToCopyWidget.save_settings()
         self._ensure_ea_update_not_offline_and_writable()
+
+        # Ensure all unassigned layers are filtered to this EA geocode before packaging
+        for _unassigned_lyr in self._get_unassigned_map_layers():
+            self._filter_unassigned_layer(_unassigned_lyr, code_digits, is_ea_level=True)
 
         # Remove stale generated rasters from previous iterations
         try:
@@ -5262,7 +4816,7 @@ class PackageDialog(QDialog, DialogUi):
                 idx = orig_name.find("_")
                 suffix = orig_name[idx:]
             else:
-                suffix = ""
+                suffix = f"_{orig_name}"
             layer_rename_map[orig_name] = f"{code_digits}{suffix}"
 
         bldg_new_name = f"{code_digits}_bldgpts"
@@ -5483,6 +5037,8 @@ class PackageDialog(QDialog, DialogUi):
                 )
 
             try:
+                for _unassigned_lyr in self._get_unassigned_map_layers():
+                    self._filter_unassigned_layer(_unassigned_lyr, code_digits, is_ea_level=True)
                 self._export_individual_layers(code_digits, subfolder_path, packaged_project_file)
             except Exception as e:
                 QgsApplication.instance().messageLog().logMessage(
@@ -6030,6 +5586,10 @@ class PackageDialog(QDialog, DialogUi):
 
             # Call the instance method to filter layers
             self.filter_layers(self.layers, selected_geocode)
+            is_ea = self.output_dropdown.currentText() == self.tr("EA Level")
+            unassigned_layers = self._get_unassigned_map_layers()
+            for lyr in unassigned_layers:
+                self._filter_unassigned_layer(lyr, selected_geocode, is_ea_level=is_ea)
             self._ensure_ea_update_not_offline_and_writable()
 
             project = QgsProject.instance()
@@ -6336,29 +5896,10 @@ class PackageDialog(QDialog, DialogUi):
         apply_subset(bldg_layer, bgy_prefix, 8)
         apply_subset(block_layer, bgy_prefix, 8)
 
-        # ea_update: keep unfiltered
-        for lyr in QgsProject.instance().mapLayers().values():
-            if not isinstance(lyr, QgsVectorLayer) or not lyr.isValid():
-                continue
-            if self._normalized_layer_name(lyr.name()).lower().endswith("_ea_update"):
-                lyr.setSubsetString("")
-
         # Filter unassigned layers for Barangay level
-        missing_warnings = []
         unassigned_layers = self._get_unassigned_map_layers()
         for lyr in unassigned_layers:
-            if self._normalized_layer_name(lyr.name()).lower().endswith("_ea_update"):
-                lyr.setSubsetString("")
-                continue
-            self._filter_unassigned_layer(lyr, bgy_geocode, is_ea_level=False, missing_field_warnings=missing_warnings)
-
-        if missing_warnings:
-            QMessageBox.warning(
-                self,
-                "Missing Geocode Fields",
-                "The following unassigned layers are missing both 'ea_geocode' and 'geocode' fields:\n\n"
-                + "\n".join(f"  • {w}" for w in missing_warnings)
-            )
+            self._filter_unassigned_layer(lyr, bgy_geocode, is_ea_level=False)
 
         # Optional linear layers: select by location against the bgy layer
         linear_layers = [l for l in (road_layer, river_layer, bridge_layer, railroad_layer) if l]
@@ -6523,6 +6064,10 @@ class PackageDialog(QDialog, DialogUi):
         self.qfield_preferences.set_value("exportDirectoryProject", str(subfolder_path))
         self.dirsToCopyWidget.save_settings()
         self._ensure_ea_update_not_offline_and_writable()
+
+        # Ensure all unassigned layers are filtered to this BGY geocode before packaging
+        for _unassigned_lyr in self._get_unassigned_map_layers():
+            self._filter_unassigned_layer(_unassigned_lyr, code_digits, is_ea_level=False)
 
         # Remove stale generated rasters from previous iterations
         try:
@@ -6790,7 +6335,7 @@ class PackageDialog(QDialog, DialogUi):
                 idx = orig_name.find("_")
                 suffix = orig_name[idx:]
             else:
-                suffix = ""
+                suffix = f"_{orig_name}"
             layer_rename_map[orig_name] = f"{code_digits}{suffix}"
 
         bldg_new_name = f"{code_digits}_bldgpts"
@@ -6997,6 +6542,8 @@ class PackageDialog(QDialog, DialogUi):
                     "GMD Pipeline", Qgis.Warning,
                 )
             try:
+                for _unassigned_lyr in self._get_unassigned_map_layers():
+                    self._filter_unassigned_layer(_unassigned_lyr, code_digits, is_ea_level=False)
                 self._export_individual_layers(code_digits, subfolder_path, packaged_project_file)
             except Exception as e:
                 QgsApplication.instance().messageLog().logMessage(
@@ -7374,8 +6921,7 @@ class PackageDialog(QDialog, DialogUi):
                     layer.setSubsetString(f"geocode LIKE '{prefix}%'")
                     updated_layers.append(layer)
                 elif layer_name.endswith('_ea_update'):
-                    # Keep _ea_update unfiltered.
-                    layer.setSubsetString("")
+                    layer.setSubsetString(f"geocode LIKE '{prefix}%'")
                     updated_layers.append(layer)
                 elif layer_name.endswith('_block'):
                     layer.setSubsetString(f"geocode LIKE '{prefix}%'")
@@ -8159,7 +7705,6 @@ class RasterClipWorker(QThread):
 
         except Exception as e:
             self.finished.emit(False, str(e))
-
 
 
 

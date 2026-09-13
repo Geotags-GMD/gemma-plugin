@@ -127,8 +127,8 @@ def run_phase_4(alg, parameters, context, feedback, multi_feedback, p1, p2, prev
                 _ean = feat.attribute(ea_id_field)
                 _ean_str = str(_ean).strip() if _ean is not None else ""
 
-                if feat.id() in delineation_candidate_ids or orig_hh >= max_household:
-                    if effective_hh < max_household:
+                if feat.id() in delineation_candidate_ids or orig_hh > max_household:
+                    if effective_hh <= max_household:
                         # Do NOT remove from delineation_candidate_ids — Phase 5 needs the full set.
                         # Simply log the bypass and conditionally add to merge candidates.
                         feedback.pushInfo(

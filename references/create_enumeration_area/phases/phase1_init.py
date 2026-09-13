@@ -95,16 +95,14 @@ def run_phase_1(
 
     barangay_id_field = "geocode"
     for i in range(ea_fields.count()):
-        name_lower = ea_fields.at(i).name().lower()
-        if name_lower in ["geocode", "bgy_geocode", "brgy_geocode", "barangay_code"]:
+        if ea_fields.at(i).name().lower() == "geocode":
             barangay_id_field = ea_fields.at(i).name()
             break
 
     bar_fields = barangay_source.fields()
     bar_geocode_field = "geocode"
     for i in range(bar_fields.count()):
-        name_lower = bar_fields.at(i).name().lower()
-        if name_lower in ["geocode", "bgy_geocode", "brgy_geocode", "barangay_code"]:
+        if bar_fields.at(i).name().lower() == "geocode":
             bar_geocode_field = bar_fields.at(i).name()
             break
 
@@ -240,7 +238,7 @@ def run_phase_1(
                 if raw_bar_geo.endswith(".0"):
                     raw_bar_geo = raw_bar_geo[:-2]
                 if not raw_bar_geo or raw_bar_geo.lower() in ('null', 'none'):
-                    for col_name in ["geocode", "bgy_geocode", "brgy_geocode", "barangay_code", "psgc"]:
+                    for col_name in ["geocode"]:
                         col_idx = best_bar_feat.fields().indexOf(col_name)
                         if col_idx != -1:
                             val = best_bar_feat.attribute(col_idx)
@@ -385,7 +383,7 @@ def run_phase_1(
                 if raw_bar_geo.endswith(".0"):
                     raw_bar_geo = raw_bar_geo[:-2]
                 if not raw_bar_geo or raw_bar_geo.lower() in ('null', 'none'):
-                    for col_name in ["geocode", "bgy_geocode", "brgy_geocode", "barangay_code", "psgc"]:
+                    for col_name in ["geocode"]:
                         col_idx = best_bar_feat.fields().indexOf(col_name)
                         if col_idx != -1:
                             val = best_bar_feat.attribute(col_idx)

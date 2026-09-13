@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none">
+  <!-- Bottom layer -->
+  <path d="M2 14.5L12 19.5L22 14.5" stroke="#1d4ed8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Middle layer -->
+  <path d="M2 10.5L12 15.5L22 10.5" stroke="#0284c7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Top layer polygon -->
+  <path d="M12 2.5L2 7.5L12 12.5L22 7.5L12 2.5Z" fill="#38bdf8" fill-opacity="0.25" stroke="#0284c7" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Style palette / wand accent -->
+  <circle cx="17.5" cy="17.5" r="3.5" fill="#f59e0b" fill-opacity="0.3" stroke="#d97706" stroke-width="1.5"/>
+  <path d="M16 17.5L19 17.5M17.5 16L17.5 19" stroke="#d97706" stroke-width="1.5" stroke-linecap="round"/>
+</svg>

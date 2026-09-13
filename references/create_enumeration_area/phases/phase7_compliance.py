@@ -67,28 +67,13 @@ def run_phase_7(
         removed = set()
         added = []
 
-        # Fix over-threshold EAs via forced geometric split (only for genuine delineation candidates)
+        # Over-threshold EAs are preserved whole with proposed delineation lines
         for i in over_idx:
-            if i in removed:
-                continue
             ea = eas[i]
-            if ea.get("original_id") not in delineation_candidate_ids:
-                continue
-            if ea.get("from_merge", False):
-                continue
-            parts = force_geometric_split(ea, max_household, feedback)
-            if len(parts) > 1:
-                removed.add(i)
-                added.extend(parts)
-                compliance_changed = True
-                feedback.pushWarning(
-                    f"[Final Sweep] Over-threshold EA (code={ea['original_code']}, "
-                    f"pop={ea['hh_count']}) force-split into {len(parts)} part(s)."
-                )
-            else:
-                feedback.pushWarning(
-                    f"[Final Sweep] EA (code={ea['original_code']}, pop={ea['hh_count']}) "
-                    f"cannot be split further — truly unresolvable."
+            if ea.get("original_id") in delineation_candidate_ids or ea.get("has_proposed_split", False):
+                feedback.pushInfo(
+                    f"[Final Sweep] Over-threshold delineation candidate EA (code={ea.get('original_code')}, "
+                    f"pop={ea.get('hh_count')}) is preserved whole with proposed delineation boundary lines."
                 )
 
         # Fix under-threshold EAs via forced merge with best barangay neighbour
@@ -200,4 +185,7 @@ def run_phase_7(
     if multi_feedback.isCanceled():
         raise QgsProcessingException("Algorithm cancelled by user.")
 
-    return {"eas": eas}
+    return {
+        "eas": eas,
+        "proposed_lines": p6.get("proposed_lines", []),
+    }

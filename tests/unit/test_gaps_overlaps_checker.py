@@ -33,6 +33,14 @@ class TestGapsOverlapsChecker(unittest.TestCase):
         self.assertIsNotNone(self.alg.createInstance())
         self.assertIsNotNone(self.alg.icon())
 
+    def test_algorithm_parameters(self):
+        """Test that algorithm parameters are properly registered in initAlgorithm."""
+        self.alg.initAlgorithm()
+        self.assertIsNotNone(self.alg.parameterDefinition(self.alg.INPUT1))
+        self.assertIsNotNone(self.alg.parameterDefinition(self.alg.INPUT2))
+        self.assertIsNotNone(self.alg.parameterDefinition(self.alg.REF_MBI_CASES))
+        self.assertIsNotNone(self.alg.parameterDefinition(self.alg.RUN_MODE))
+
 
 if __name__ == "__main__":
     unittest.main()

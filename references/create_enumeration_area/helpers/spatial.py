@@ -53,7 +53,13 @@ def resolve_ea_parent_barangay(
     # 1. Primary: Spatial overlay with Barangay Layer
     parent_feat = get_parent_barangay(ea_feat.geometry(), barangay_index, barangay_by_id)
     if parent_feat:
-        val = parent_feat.attribute(barangay_id_field)
+        val = None
+        for f in parent_feat.fields():
+            if f.name().lower() == "geocode":
+                val = parent_feat.attribute(f.name())
+                break
+        if val is None and parent_feat.fields().indexOf(barangay_id_field) != -1:
+            val = parent_feat.attribute(barangay_id_field)
         res = normalize_to_8_digits(val)
         if res:
             return res
@@ -64,4 +70,9 @@ def resolve_ea_parent_barangay(
         res = normalize_to_8_digits(val)
         if res:
             return res
+    for f in ea_feat.fields():
+        if f.name().lower() == "geocode":
+            res = normalize_to_8_digits(ea_feat.attribute(f.name()))
+            if res:
+                return res
     return "Unknown"

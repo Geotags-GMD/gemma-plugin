@@ -1,7 +1,7 @@
 # ----------------------------------------------------------------------
 # MBI Gaps / Overlaps / Disputed Areas Checker
-# Last updated: 2026-08-20
-# Version: v10
+# Last updated: 2026-09-03
+# Version: v12
 #
 # Changelog:
 #   v1 - Initial Gaps/Overlaps detection between LGU and PSA polygons.
@@ -30,6 +30,24 @@
 #         Areas output layer at all; run_disputed is now always False.
 #         (Disputed-polygon exclusion logic used internally by Gap
 #         detection is unaffected.)
+#   v11 - Reference MBI cases are now taken into account during Gap
+#         detection. Features whose 'mbi_type' contains 'Disputed' are
+#         unioned and subtracted from gap geometries, so an already-filed
+#         Disputed case is never re-reported as a Gap.
+#         The source layer(s) are chosen via the required
+#         'Reference MBI Cases Layer (ref_mbi_cases)' parameter. An
+#         auto-detection fallback (any loaded polygon layer carrying an
+#         'mbi_type' field, excluding the input layers) is retained for
+#         programmatic callers, but is unreachable from the dialog now that
+#         the parameter is required.
+#   v12 - Fixed overlaps being silently dropped when the two overlapping
+#         polygons belong to the SAME barangay (e.g. adjacent EAs inside one
+#         barangay) or carry no barangay/city_mun attributes at all.
+#         get_involved() grouped participants by barangay label, so such a
+#         pair collapsed into one entry and failed the 'len(involved) < 2'
+#         test. Overlap detection now groups by feature (by_feature=True),
+#         so each polygon counts separately. Gap detection keeps the
+#         original per-barangay grouping.
 # ----------------------------------------------------------------------
 
 __author__ = 'Geospatial Management Division'
@@ -65,9 +83,15 @@ import processing
 
 class GapsOverlaps(QgsProcessingAlgorithm):
 
-    INPUT1   = 'INPUT1'
-    INPUT2   = 'INPUT2'
-    RUN_MODE = 'RUN_MODE'
+    INPUT1        = 'INPUT1'
+    INPUT2        = 'INPUT2'
+    REF_MBI_CASES = 'REF_MBI_CASES'
+    RUN_MODE      = 'RUN_MODE'
+
+    # Field that marks a layer as a reference MBI cases layer during
+    # auto-detection, and the value fragment that flags a disputed case.
+    REF_CASE_FIELD    = 'mbi_type'
+    REF_DISPUTED_FLAG = 'disputed'
 
     def __init__(self):
         super().__init__()
@@ -107,6 +131,17 @@ class GapsOverlaps(QgsProcessingAlgorithm):
             "<li><b>Overlaps</b> — Intersecting polygon pairs. "
             "<i>mbi_type</i> = <b>2_Overlap</b>.</li>"
             "</ul>"
+            "<h3>Reference MBI Cases</h3>"
+            "<p>Previously filed MBI cases are excluded from Gap detection: any "
+            "feature whose <i>mbi_type</i> reads as <b>Disputed</b> (e.g. "
+            "<b>3_Disputed</b>) has its footprint subtracted from the gap result, so "
+            "an area already recorded as disputed is not reported again as a Gap. "
+            "Features with any other <i>mbi_type</i> are ignored.</p>"
+            "<p>Select the case layer(s) in <b>Reference MBI Cases Layer "
+            "(ref_mbi_cases)</b>. This input is required — the layer must carry an "
+            "<i>mbi_type</i> field for its Disputed cases to be picked up; a layer "
+            "without that field is accepted but contributes nothing, and a warning is "
+            "written to the log.</p>"
             "<h3>Output Fields</h3>"
             "<ul>"
             "<li><b>case_uuid</b> — UUID per finding</li>"
@@ -139,6 +174,14 @@ class GapsOverlaps(QgsProcessingAlgorithm):
             )
         )
         self.addParameter(
+            QgsProcessingParameterMultipleLayers(
+                self.REF_MBI_CASES,
+                'Reference MBI Cases Layer (ref_mbi_cases)',
+                QgsProcessing.TypeVectorPolygon,
+                optional=True
+            )
+        )
+        self.addParameter(
             QgsProcessingParameterEnum(
                 self.RUN_MODE,
                 'Analysis to Run',
@@ -161,6 +204,7 @@ class GapsOverlaps(QgsProcessingAlgorithm):
 
         polygon_layers = self.parameterAsLayerList(parameters, self.INPUT1, context)
         building_layers = self.parameterAsLayerList(parameters, self.INPUT2, context)
+        ref_case_selected = self.parameterAsLayerList(parameters, self.REF_MBI_CASES, context) or []
         run_mode = self.parameterAsEnum(parameters, self.RUN_MODE, context)
 
         if not polygon_layers:
@@ -273,6 +317,56 @@ class GapsOverlaps(QgsProcessingAlgorithm):
                 {'INPUT': single, 'METHOD': 1, 'OUTPUT': 'memory:'},
                 context=context, feedback=feedback
             )['OUTPUT'])
+
+        def resolve_ref_case_layers():
+            """
+            Return the reference MBI cases layer(s) to scan, plus a label
+            describing where they came from (for the log).
+
+            Layers explicitly chosen in the 'Reference MBI Cases Layer(s)'
+            parameter always win. Only when that is left blank does the
+            project get auto-scanned.
+            """
+            if ref_case_selected:
+                # An explicit choice is honoured as-is, but flag any layer that
+                # cannot contribute because it has no 'mbi_type' field.
+                for lyr in ref_case_selected:
+                    names = {f.name().lower() for f in lyr.fields()}
+                    if self.REF_CASE_FIELD.lower() not in names:
+                        feedback.pushInfo(
+                            f"  WARNING: selected layer '{lyr.name()}' has no "
+                            f"'{self.REF_CASE_FIELD}' field — it contributes no "
+                            f"Disputed areas."
+                        )
+                return ref_case_selected, 'selected'
+            return detect_ref_case_layers(), 'auto-detected'
+
+        def detect_ref_case_layers():
+            """
+            Auto-detect reference MBI cases layer(s) from the current project.
+
+            A layer qualifies when it is a valid polygon vector layer carrying
+            an 'mbi_type' field (case-insensitive) and was not one of the
+            layers picked as an input for this run.
+            """
+            input_ids = {
+                l.id() for l in list(polygon_layers) + list(building_layers)
+                if l is not None
+            }
+            found = []
+            for lyr in QgsProject.instance().mapLayers().values():
+                if not isinstance(lyr, QgsVectorLayer) or not lyr.isValid():
+                    continue
+                if lyr.id() in input_ids:
+                    continue
+                if lyr.geometryType() != QgsWkbTypes.PolygonGeometry:
+                    continue
+                names = {f.name().lower() for f in lyr.fields()}
+                if self.REF_CASE_FIELD.lower() not in names:
+                    continue
+                found.append(lyr)
+            found.sort(key=lambda l: l.name())
+            return found
 
         # ------------------------------------------------------------------
         # Output layer schema
@@ -396,7 +490,17 @@ class GapsOverlaps(QgsProcessingAlgorithm):
                     pass
             return cnt
 
-        def get_involved(finding_geom, gap_mode=False):
+        def get_involved(finding_geom, gap_mode=False, by_feature=False):
+            """
+            List the polygons that take part in a finding.
+
+            by_feature=False groups them by barangay label, so one barangay
+            counts once no matter how many of its polygons touch the finding.
+            by_feature=True keeps every polygon as its own entry — required for
+            overlaps, where two polygons of the SAME barangay (e.g. adjacent
+            EAs, or polygons with no barangay attributes at all) share a label
+            and would otherwise collapse into a single entry and be discarded.
+            """
             search_geom = finding_geom.buffer(0.50, 5) if gap_mode else finding_geom
             grouped = {}
             for fid in polygon_index.intersects(search_geom.boundingBox()):
@@ -419,18 +523,20 @@ class GapsOverlaps(QgsProcessingAlgorithm):
                 except Exception:
                     continue
                 label = label_from_info(info)
-                if label not in grouped:
-                    grouped[label] = {'info': info, 'covered_area': 0.0}
-                grouped[label]['covered_area'] += covered
+                key   = fid if by_feature else label
+                if key not in grouped:
+                    grouped[key] = {'info': info, 'label': label, 'covered_area': 0.0}
+                grouped[key]['covered_area'] += covered
 
             if gap_mode and grouped:
                 share = safe_area(finding_geom) / len(grouped)
-                for label in grouped:
-                    grouped[label]['covered_area'] = share
+                for key in grouped:
+                    grouped[key]['covered_area'] = share
 
             out = [
-                {'label': label, 'info': data['info'], 'covered_area': data['covered_area']}
-                for label, data in grouped.items()
+                {'label': data['label'], 'info': data['info'],
+                 'covered_area': data['covered_area']}
+                for data in grouped.values()
             ]
             out.sort(key=lambda x: x['label'])
             return out
@@ -628,7 +734,7 @@ class GapsOverlaps(QgsProcessingAlgorithm):
                             if safe_area(part) <= 0.10:
                                 continue
 
-                            involved = get_involved(part, gap_mode=False)
+                            involved = get_involved(part, gap_mode=False, by_feature=True)
                             if len(involved) < 2:
                                 continue
 
@@ -743,6 +849,47 @@ class GapsOverlaps(QgsProcessingAlgorithm):
                 else:
                     disputed_geom_union = disputed_geom_union.combine(d_geom_3857)
 
+            # Reference MBI cases: any feature whose 'mbi_type' reads as
+            # Disputed (e.g. '3_Disputed') marks an area that has already been
+            # filed as a dispute, so it must not be re-reported as a Gap. Its
+            # footprint is merged into the same subtraction union above.
+            ref_case_layers, ref_source = resolve_ref_case_layers()
+            if ref_case_layers:
+                feedback.pushInfo(
+                    f"Using {len(ref_case_layers)} {ref_source} reference MBI cases "
+                    f"layer(s): " + ', '.join(l.name() for l in ref_case_layers)
+                )
+                ref_merged = merge_layers(ref_case_layers, ref_case_layers[0].crs())
+                ref_fixed  = reproject_fix(ref_merged)   # -> EPSG:3857
+
+                ref_disputed_count = 0
+                for feat in ref_fixed.getFeatures():
+                    if self.REF_DISPUTED_FLAG not in txt(
+                        get_attr(feat, [self.REF_CASE_FIELD])
+                    ).lower():
+                        continue
+                    r_geom = feat.geometry()
+                    if r_geom is None or r_geom.isEmpty():
+                        continue
+                    ref_disputed_count += 1
+                    r_geom_3857 = QgsGeometry(r_geom)   # already in EPSG:3857
+                    if disputed_geom_union is None:
+                        disputed_geom_union = r_geom_3857
+                    else:
+                        disputed_geom_union = disputed_geom_union.combine(r_geom_3857)
+
+                feedback.pushInfo(
+                    f"  {ref_disputed_count} Disputed reference case(s) excluded "
+                    f"from Gap detection."
+                )
+            else:
+                feedback.pushInfo(
+                    "No reference MBI cases layer selected or detected in the "
+                    f"project (auto-detection needs a polygon layer with an "
+                    f"'{self.REF_CASE_FIELD}' field). Continuing without "
+                    f"Disputed-case exclusion."
+                )
+
             for feat in gap_fixed.getFeatures():
                 geom = feat.geometry()
                 if geom is None or geom.isEmpty():
@@ -788,5 +935,5 @@ class GapsOverlaps(QgsProcessingAlgorithm):
 
             feedback.setProgress(100)
 
-        feedback.pushInfo("Finished LGU vs PSA Boundary Gap and Overlap Checker v10.")
+        feedback.pushInfo("Finished LGU vs PSA Boundary Gap and Overlap Checker v12.")
         return results

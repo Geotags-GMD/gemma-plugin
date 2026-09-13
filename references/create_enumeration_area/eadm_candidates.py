@@ -55,7 +55,6 @@ class EADMCandidatesAlgorithm(QgsProcessingAlgorithm):
     MERGED_OUTPUT = "MERGED_OUTPUT"
     SPECIAL_EA_OUTPUT = "SPECIAL_EA_OUTPUT"
     DELINEATION_CANDIDATE_OUTPUT = "DELINEATION_CANDIDATE_OUTPUT"
-    MERGE_CANDIDATE_OUTPUT = "MERGE_CANDIDATE_OUTPUT"
     EXTRACTED_BUILDINGS_OUTPUT = "EXTRACTED_BUILDINGS_OUTPUT"
     SLIVER_THRESHOLD = "SLIVER_THRESHOLD"
     PREVIEW_ONLY = "PREVIEW_ONLY"
@@ -187,8 +186,6 @@ class EADMCandidatesAlgorithm(QgsProcessingAlgorithm):
             "Contains EAs generated from processing user-supplied Gap or Overlap polygon layers.</li>"
             "<li><b>Delineation Candidate Layer</b> (polygon, named <i>&lt;5-digit geocode&gt;_delineation_candidates</i>) — "
             "Contains starting EAs exceeding the maximum household limit (>= max_household) or intersecting Gap/Overlap layers.</li>"
-            "<li><b>Merge Candidate Layer</b> (polygon, named <i>&lt;5-digit geocode&gt;_merge_candidates</i>) — "
-            "Contains under-threshold initiator EAs (<= min_household) together with their adjacent reference neighbor EAs evaluated for intra-barangay merging.</li>"
             "<li><b>Extracted Building Points Layer</b> (point, named <i>&lt;5-digit geocode&gt;_extracted_bldgpts</i>) — "
             "Contains building points extracted within the candidate EAs.</li>"
             "</ul>"
@@ -476,16 +473,6 @@ class EADMCandidatesAlgorithm(QgsProcessingAlgorithm):
             )
         )
 
-        # Candidate for merging output layer
-        self.addParameter(
-            QgsProcessingParameterFeatureSink(
-                self.MERGE_CANDIDATE_OUTPUT,
-                "Candidate for Merging Layer",
-                type=QgsProcessing.SourceType.TypeVector,
-                optional=True,
-            )
-        )
-
         # Extracted building points output layer
         self.addParameter(
             QgsProcessingParameterFeatureSink(
@@ -580,7 +567,13 @@ class EADMCandidatesAlgorithm(QgsProcessingAlgorithm):
         def resolve_ea_parent_barangay(ea_feat):
             parent_feat = get_parent_barangay(ea_feat.geometry())
             if parent_feat:
-                val = parent_feat.attribute(barangay_id_field)
+                val = None
+                for f in parent_feat.fields():
+                    if f.name().lower() == "geocode":
+                        val = parent_feat.attribute(f.name())
+                        break
+                if val is None and parent_feat.fields().indexOf(barangay_id_field) != -1:
+                    val = parent_feat.attribute(barangay_id_field)
                 if val is not None and not (isinstance(val, QVariant) and val.isNull()):
                     val_str = str(val).strip()
                     if val_str.endswith(".0"):
@@ -596,6 +589,16 @@ class EADMCandidatesAlgorithm(QgsProcessingAlgorithm):
                     if val_str:
                         if len(val_str) > 5 and len(val_str) in (9, 10, 11, 12):
                             return val_str[:5]
+            for f in ea_feat.fields():
+                if f.name().lower() == "geocode":
+                    val = ea_feat.attribute(f.name())
+                    if val is not None and not (isinstance(val, QVariant) and val.isNull()):
+                        val_str = str(val).strip()
+                        if val_str.endswith(".0"):
+                            val_str = val_str[:-2]
+                        if val_str:
+                            if len(val_str) > 5 and len(val_str) in (9, 10, 11, 12):
+                                return val_str[:5]
                         return val_str
             return "Unknown"
 
@@ -618,11 +621,9 @@ class EADMCandidatesAlgorithm(QgsProcessingAlgorithm):
         merged_sink = p2["merged_sink"]
         extracted_buildings_sink = p2["extracted_buildings_sink"]
         delin_candidate_sink = p2["delin_candidate_sink"]
-        merge_candidate_sink = p2["merge_candidate_sink"]
         delineated_feat_count = p2["delineated_feat_count"]
         merged_feat_count = p2["merged_feat_count"]
         delin_candidate_feat_count = p2["delin_candidate_feat_count"]
-        merge_candidate_feat_count = p2["merge_candidate_feat_count"]
         extracted_bldg_feat_count = p2["extracted_bldg_feat_count"]
         delineation_candidate_ids = p2["delineation_candidate_ids"]
         merge_candidate_ids = p2["merge_candidate_ids"]
@@ -685,10 +686,10 @@ class EADMCandidatesAlgorithm(QgsProcessingAlgorithm):
             from .helpers.style import apply_qml_to_layer
 
             styles_map = {
+                self.EXTRACTED_BUILDINGS_OUTPUT: "extracted_bldgpts.qml",
                 self.DELINEATED_OUTPUT: "ea_output.qml",
                 self.MERGED_OUTPUT: "ea_output.qml",
                 self.DELINEATION_CANDIDATE_OUTPUT: "delineation_candidates.qml",
-                self.MERGE_CANDIDATE_OUTPUT: "merge_candidates.qml",
             }
 
             for param_name, qml_filename in styles_map.items():
@@ -704,7 +705,7 @@ class EADMCandidatesAlgorithm(QgsProcessingAlgorithm):
         if hasattr(super(), "postProcessAlgorithm"):
             try:
                 return super().postProcessAlgorithm(context, feedback)
-            except AttributeError:
+            except (AttributeError, TypeError, Exception):
                 pass
         return {}
 

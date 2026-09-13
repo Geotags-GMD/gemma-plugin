@@ -1,9 +1,8 @@
 import os
 import re
-import math
 
 from qgis.PyQt.QtCore import QCoreApplication, QVariant
-from qgis.PyQt.QtGui import QColor, QIcon, QTransform
+from qgis.PyQt.QtGui import QColor, QIcon
 from qgis.core import (
     QgsProject,
     QgsProcessing,
@@ -13,8 +12,6 @@ from qgis.core import (
     QgsProcessingFeedback,
     QgsProcessingParameterVectorLayer,
     QgsProcessingParameterField,
-    QgsProcessingParameterBoolean,
-    QgsProcessingParameterEnum,
     QgsProcessingLayerPostProcessorInterface,
     QgsExpression,
     QgsVectorLayer,
@@ -22,7 +19,6 @@ from qgis.core import (
     QgsFields,
     QgsField,
     QgsGeometry,
-    QgsPointXY,
     QgsSpatialIndex,
     QgsCoordinateTransform,
     QgsWkbTypes,
@@ -57,21 +53,7 @@ BUILDING_LAYER_HINTS = [
 # results instead of the original source layers.
 OUTPUT_NAME_MARKERS = [
     "_matched", "_unmatched", "inside lgu boundary", "outside lgu boundary",
-    "_aligned",
 ]
-
-# Alignment transform models offered by the ALIGN_MODEL parameter, in the
-# order they appear in the dropdown. Similarity is the default (index 0):
-# it is the model that matches the physical cause -- one base image
-# georeferenced with a slightly different position, bearing and ground
-# resolution than another -- while still preserving the LGU boundary's own
-# shape and proportions exactly. See the big comment above _rigid_fit().
-ALIGN_MODEL_OPTIONS = [
-    "Similarity - shift + rotate + uniform scale (recommended)",
-    "Rigid - shift + rotate only (distances kept exactly)",
-    "Affine - shift + rotate + x/y scale + shear (absorbs the most)",
-]
-ALIGN_MODEL_NAMES = ["similarity", "rigid", "affine"]
 
 
 def find_default_layer_id(hints, geometry_type, exclude_ids=()):
@@ -266,21 +248,6 @@ def style_boundary_outline(layer, color):
     layer.setRenderer(QgsSingleSymbolRenderer(symbol))
 
 
-def style_aligned_boundary_outline(layer, color):
-    """Style a polygon layer the same way as style_boundary_outline(), but
-    with a dashed outline -- used for the LGU-Aligned outputs so they read
-    as a derived/estimated boundary rather than as a third original source
-    next to the PSA (blue) and LGU (yellow) outlines."""
-    symbol = QgsFillSymbol.createSimple({
-        "color": "0,0,0,0",       # transparent fill
-        "outline_color": color,
-        "outline_width": "0.6",
-        "outline_width_unit": "MM",
-        "outline_style": "dash",
-    })
-    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
-
-
 def style_building_points(layer, color):
     """Style a building-point layer as small filled circles in color --
     used to tell the points inside the LGU boundary (green) from the ones
@@ -312,8 +279,8 @@ def label_by_field(layer, field_name, source_suffix=None, color=None):
     map at a glance instead of reading as duplicate text.
 
     color, when given, is the same color name/spec passed to
-    style_boundary_outline()/style_aligned_boundary_outline() for this
-    layer's own outline -- the label then reads in that color too, so a
+    style_boundary_outline() for this layer's own outline -- the label then
+    reads in that color too, so a
     label can be matched back to its polygon at a glance instead of every
     layer's labels looking identical. Defaults to white when omitted.
     """
@@ -374,330 +341,9 @@ def first8(value):
     return s[:8]
 
 
-# ---------------------------------------------------------------------------
-# LGU boundary alignment: whole-map best-fit onto the PSA boundary.
-#
-# The LGU-submitted boundary and the PSA boundary are digitised independently
-# and often from different base-image vintages -- the LGU layer is
-# frequently traced from an older, less accurately georeferenced image. Even
-# where the two shapes agree closely (same barangay, same rough outline),
-# the whole LGU boundary can sit shifted, rotated AND scaled relative to the
-# PSA one, purely as an artifact of the imagery, not a real difference in
-# where the LGU says the boundary is.
-#
-# Scale matters as much as shift here. An old base image georeferenced with
-# a slightly wrong ground resolution reproduces every distance on the map a
-# percent or two off, so the traced boundary comes out systematically too
-# small (or too large). The tell-tale sign is a mismatch that GROWS with
-# distance from the middle of the municipality: the barangays in the centre
-# sit almost on top of their PSA counterparts while the ones out at the
-# edges are far off, all leaning outward (or inward) from the centre. No
-# amount of shifting and rotating can close that -- only a scale change can,
-# which is why a plain rigid (shift + rotate) fit can look badly off across
-# a whole municipality even when it is the mathematically best rigid fit
-# available.
-#
-# So three models are offered, in increasing order of freedom. Every one of
-# them is a single GLOBAL linear map applied identically to every polygon,
-# which is what guarantees the LGU boundary keeps its own internal shape:
-# two barangays that shared an edge still share it afterwards, no gaps or
-# overlaps can open between them, and no barangay is reshaped relative to
-# its neighbours. What changes between models is only how much of the
-# base-image error they are able to absorb:
-#
-#   rigid      (3 params) shift + rotate. Distances preserved exactly.
-#   similarity (4 params) shift + rotate + one uniform scale. Shape and
-#              angles preserved exactly, size may change -- the classic
-#              model for "same map, differently georeferenced", and the
-#              default here.
-#   affine     (6 params) shift + rotate + separate x/y scale + shear.
-#              Absorbs the most, at the cost of no longer preserving
-#              angles exactly.
-#
-# Whatever is left over after the chosen model has done its best is not a
-# georeferencing artifact -- it is the LGU and PSA genuinely disagreeing
-# about where the boundary runs, which is exactly what this tool exists to
-# show. Alignment is only ever meant to strip out the imagery error so that
-# what remains on screen is the real disagreement.
-#
-# A transform is carried around as a 6-tuple of affine coefficients
-# (a, b, c, d, e, f), meaning
-#     x' = a*x + b*y + c
-#     y' = d*x + e*y + f
-# so that every model produces the same kind of value and the ICP loop, the
-# geometry transform and the reporting below are all model-agnostic.
-# ---------------------------------------------------------------------------
-
-IDENTITY_COEFFS = (1.0, 0.0, 0.0, 0.0, 1.0, 0.0)
-
-
-def _apply_coeffs(coeffs, x, y):
-    """Map one (x, y) through a 6-tuple of affine coefficients."""
-    a, b, c, d, e, f = coeffs
-    return a * x + b * y + c, d * x + e * y + f
-
-
-def _centroid(points):
-    n = len(points)
-    return sum(p[0] for p in points) / n, sum(p[1] for p in points) / n
-
-
-def _rigid_fit(pairs):
-    """Closed-form 2D orthogonal Procrustes fit: the rotation (radians) and
-    translation that best map each (lgu_x, lgu_y) in *pairs* onto its
-    paired (psa_x, psa_y), minimizing total squared distance. This is the
-    2D equivalent of the Kabsch algorithm -- a 2D rotation has a single
-    degree of freedom, so the optimum has a closed form and no SVD/numpy is
-    needed.
-
-    Returns (theta, tx, ty), or None when fewer than 2 pairs are given (a
-    single point pair fixes a translation but not a rotation)."""
-    n = len(pairs)
-    if n < 2:
-        return None
-
-    lgu_cx = sum(p[0][0] for p in pairs) / n
-    lgu_cy = sum(p[0][1] for p in pairs) / n
-    psa_cx = sum(p[1][0] for p in pairs) / n
-    psa_cy = sum(p[1][1] for p in pairs) / n
-
-    numerator = 0.0    # sum(psa' x lgu'), i.e. the sine-weighted term
-    denominator = 0.0  # sum(psa' . lgu'), i.e. the cosine-weighted term
-    for (lx, ly), (px, py) in pairs:
-        lxc, lyc = lx - lgu_cx, ly - lgu_cy
-        pxc, pyc = px - psa_cx, py - psa_cy
-        denominator += pxc * lxc + pyc * lyc
-        numerator += pyc * lxc - pxc * lyc
-
-    theta = math.atan2(numerator, denominator)
-    cos_t, sin_t = math.cos(theta), math.sin(theta)
-    tx = psa_cx - (cos_t * lgu_cx - sin_t * lgu_cy)
-    ty = psa_cy - (sin_t * lgu_cx + cos_t * lgu_cy)
-    return theta, tx, ty
-
-
-def _translation_only_fit(lgu_point, psa_point):
-    """Fallback used when there is only one usable control point: shift
-    lgu_point onto psa_point with no rotation."""
-    return 0.0, psa_point[0] - lgu_point[0], psa_point[1] - lgu_point[1]
-
-
-def _rigid_coeffs(pairs):
-    """_rigid_fit() expressed as affine coefficients: shift + rotate only,
-    every distance on the map preserved exactly."""
-    fit = _rigid_fit(pairs)
-    if fit is None:
-        return None
-    theta, tx, ty = fit
-    cos_t, sin_t = math.cos(theta), math.sin(theta)
-    return (cos_t, -sin_t, tx, sin_t, cos_t, ty)
-
-
-def _translation_coeffs(lgu_point, psa_point):
-    """Last-resort fallback: pure shift, no rotation or scale."""
-    theta, tx, ty = _translation_only_fit(lgu_point, psa_point)
-    return (1.0, 0.0, tx, 0.0, 1.0, ty)
-
-
-def _similarity_coeffs(pairs):
-    """Closed-form 4-parameter Helmert fit: shift + rotation + ONE uniform
-    scale, least-squares over *pairs*.
-
-    This is _rigid_fit with the unit-length constraint on the rotation
-    lifted, so the same closed form falls out without any iteration: with
-    both point sets centred, the optimum is a = dot/norm and b = cross/norm,
-    where the rotation is atan2(b, a) and the scale is hypot(a, b).
-
-    Angles and proportions are preserved exactly -- the LGU shape is only
-    repositioned and resized, never distorted -- which makes this the right
-    default for correcting an old base image whose ground resolution was
-    slightly off.
-
-    Returns 6 affine coefficients, or None for fewer than 2 pairs (or a
-    degenerate set of identical points, which fixes no scale)."""
-    n = len(pairs)
-    if n < 2:
-        return None
-
-    lgu_cx, lgu_cy = _centroid([p[0] for p in pairs])
-    psa_cx, psa_cy = _centroid([p[1] for p in pairs])
-
-    norm = 0.0   # sum |lgu'|^2
-    dot = 0.0    # sum(psa' . lgu')
-    cross = 0.0  # sum(psa' x lgu')
-    for (lx, ly), (px, py) in pairs:
-        lxc, lyc = lx - lgu_cx, ly - lgu_cy
-        pxc, pyc = px - psa_cx, py - psa_cy
-        norm += lxc * lxc + lyc * lyc
-        dot += pxc * lxc + pyc * lyc
-        cross += pyc * lxc - pxc * lyc
-
-    if norm <= 0.0:
-        return None
-
-    a = dot / norm     # scale * cos(theta)
-    b = cross / norm   # scale * sin(theta)
-    tx = psa_cx - (a * lgu_cx - b * lgu_cy)
-    ty = psa_cy - (b * lgu_cx + a * lgu_cy)
-    return (a, -b, tx, b, a, ty)
-
-
-def _affine_coeffs(pairs):
-    """Least-squares 6-parameter affine fit: shift + rotation + separate
-    x/y scale + shear.
-
-    Both point sets are centred before the normal equations are formed --
-    projected coordinates run to seven digits, and squaring those directly
-    would throw away most of the available precision. Centring reduces the
-    fit to a 2x2 system per output axis, solved by determinant, with the
-    translation recovered from the centroids afterwards.
-
-    Returns 6 affine coefficients, or None for fewer than 3 pairs or a
-    collinear set (which pins down no unique affine map)."""
-    n = len(pairs)
-    if n < 3:
-        return None
-
-    lgu_cx, lgu_cy = _centroid([p[0] for p in pairs])
-    psa_cx, psa_cy = _centroid([p[1] for p in pairs])
-
-    sxx = sxy = syy = 0.0
-    sxpx = sypx = sxpy = sypy = 0.0
-    for (lx, ly), (px, py) in pairs:
-        lxc, lyc = lx - lgu_cx, ly - lgu_cy
-        pxc, pyc = px - psa_cx, py - psa_cy
-        sxx += lxc * lxc
-        sxy += lxc * lyc
-        syy += lyc * lyc
-        sxpx += lxc * pxc
-        sypx += lyc * pxc
-        sxpy += lxc * pyc
-        sypy += lyc * pyc
-
-    det = sxx * syy - sxy * sxy
-    # A collinear (or single-point) control set leaves the cross-axis term
-    # undetermined; there is no unique affine map through it.
-    if abs(det) <= 1e-12 * max(1.0, sxx * syy):
-        return None
-
-    a = (syy * sxpx - sxy * sypx) / det
-    b = (sxx * sypx - sxy * sxpx) / det
-    d = (syy * sxpy - sxy * sypy) / det
-    e = (sxx * sypy - sxy * sxpy) / det
-    c = psa_cx - (a * lgu_cx + b * lgu_cy)
-    f = psa_cy - (d * lgu_cx + e * lgu_cy)
-    return (a, b, c, d, e, f)
-
-
-def _describe_coeffs(coeffs, at_point):
-    """Return (shift, rotation_degrees, scale) describing what *coeffs*
-    does to a map, with the shift measured at *at_point*.
-
-    The c/f translation coefficients on their own are measured from the CRS
-    origin, which for a projected CRS sits hundreds of kilometres away, so
-    quoting them says nothing about how far the boundary actually moved.
-    Measuring the displacement of a point in the middle of the data does.
-    Scale comes from the square root of the determinant, which is the mean
-    linear scale factor for any of the three models."""
-    a, b, _c, d, _e, _f = coeffs
-    x, y = at_point
-    nx, ny = _apply_coeffs(coeffs, x, y)
-    shift = math.hypot(nx - x, ny - y)
-    rotation = math.degrees(math.atan2(d, a))
-    scale = math.sqrt(abs(a * coeffs[4] - b * d))
-    return shift, rotation, scale
-
-
-def _geometry_vertex_list(geometry):
-    """Return every vertex of *geometry* as a list of (x, y) tuples."""
-    return [(v.x(), v.y()) for v in geometry.vertices()]
-
-
-def _icp_fit(groups, coeff_fit, initial_coeffs=None, max_iterations=12, tolerance=1e-6):
-    """Iterative Closest Point: refine ONE shared transform across every
-    barangay group in *groups* at once, under the model *coeff_fit*
-    (_rigid_coeffs / _similarity_coeffs / _affine_coeffs).
-
-    groups is a list of (lgu_vertices, psa_reference_geom) pairs, one per
-    matched barangay -- lgu_vertices are that barangay's original,
-    untransformed LGU vertices, and psa_reference_geom is its PSA
-    counterpart's boundary. Each iteration re-pairs every (currently
-    transformed) vertex with the nearest point on its OWN barangay's PSA
-    reference (never a merged multi-barangay geometry, so a lookup never
-    has to scan more than one barangay's worth of boundary), then re-solves
-    the closed-form fit against every group's correspondences COMBINED --
-    the standard point-to-boundary ICP loop, but solving one fit for all of
-    them together rather than one fit per group.
-
-    Solving a single shared transform, instead of letting each barangay
-    settle on its own best fit independently, is what keeps two barangays
-    that shared an edge in the original LGU layer still sharing that edge
-    after alignment: every polygon in every group ends up mapped by the
-    exact same linear function, so nothing between them can pull apart into
-    a gap or overlap. An independent per-group fit does not have that
-    guarantee -- neighbouring barangays can each be nudged by a slightly
-    different amount, opening a seam where their edges used to meet.
-
-    initial_coeffs is the starting transform, and matters more than it
-    looks: nearest-point correspondences are only meaningful once the two
-    maps roughly overlap, so starting from a coarse centroid-based fit
-    rather than from the identity is what keeps a large initial offset from
-    pairing vertices with whatever stretch of PSA boundary happens to be
-    nearest and settling into a bad local minimum.
-
-    Returns 6 affine coefficients, or None when the correspondences never
-    supported a fit under this model."""
-    groups = [(verts, ref) for verts, ref in groups
-              if verts and ref is not None and not ref.isEmpty()]
-    if not groups:
-        return None
-
-    coeffs = initial_coeffs or IDENTITY_COEFFS
-    best = initial_coeffs
-    prev_cost = None
-    for _ in range(max_iterations):
-        pairs = []
-        cost = 0.0
-        for lgu_vertices, psa_reference_geom in groups:
-            for x, y in lgu_vertices:
-                cx, cy = _apply_coeffs(coeffs, x, y)
-                sq_dist, near_pt, _after, _side = psa_reference_geom.closestSegmentWithContext(
-                    QgsPointXY(cx, cy))
-                cost += sq_dist
-                pairs.append(((x, y), (near_pt.x(), near_pt.y())))
-
-        fit = coeff_fit(pairs)
-        if fit is None:
-            break
-        coeffs = fit
-        best = fit
-
-        if prev_cost is not None and abs(prev_cost - cost) <= tolerance * max(1.0, prev_cost):
-            break
-        prev_cost = cost
-
-    return best
-
-
-def _apply_affine_transform(geometry, coeffs):
-    """Return a copy of *geometry* mapped through the 6 affine
-    coefficients in *coeffs*.
-
-    QTransform's constructor takes (m11, m12, m21, m22, dx, dy) and maps a
-    point as x' = m11*x + m21*y + dx, y' = m12*x + m22*y + dy -- so the
-    coefficients go in transposed relative to how they read in
-    _apply_coeffs()."""
-    a, b, c, d, e, f = coeffs
-    matrix = QTransform(a, d, b, e, c, f)
-    out = QgsGeometry(geometry)
-    out.transform(matrix)
-    return out
-
-
 class _LguBoundaryLocator:
-    """Point-in-polygon lookup over a set of boundary polygons -- the LGU
-    layer, the PSA layer, or the in-memory ALIGNED LGU geometries computed
-    above all use one of these, keyed the same way.
+    """Point-in-polygon lookup over a set of boundary polygons, keyed by
+    first-8 geocode -- used for the LGU layer.
 
     A building point counts as inside when it falls within the polygon(s)
     of the barangay ITS OWN GEOCODE names -- not merely somewhere within
@@ -716,15 +362,13 @@ class _LguBoundaryLocator:
 
     Polygons added via add() are keyed on feature id for the spatial
     index, so those features must come from a layer (provider ids are
-    unique); add_geometry() is for a geometry with no backing feature (an
-    aligned copy computed in-memory) and assigns it a synthetic id instead.
+    unique).
     """
 
     def __init__(self):
         self._index = QgsSpatialIndex()
         self._entries = {}
         self._by_code = {}
-        self._next_synthetic_id = 1
 
     def add(self, feature, code):
         """Index one polygon under its first-8 geocode. Null/empty
@@ -734,19 +378,6 @@ class _LguBoundaryLocator:
             return
         self._index.addFeature(feature)
         self._entries[feature.id()] = (geometry, code)
-        self._by_code.setdefault(code, []).append(geometry)
-
-    def add_geometry(self, geometry, code):
-        """Like add(), but for a geometry with no backing feature."""
-        if geometry is None or geometry.isEmpty():
-            return
-        fid = self._next_synthetic_id
-        self._next_synthetic_id += 1
-        fake = QgsFeature()
-        fake.setId(fid)
-        fake.setGeometry(geometry)
-        self._index.addFeature(fake)
-        self._entries[fid] = (geometry, code)
         self._by_code.setdefault(code, []).append(geometry)
 
     def is_empty(self):
@@ -819,16 +450,13 @@ class _RunCoordinator:
 
     - Moves each output layer into one layer-tree group for this run (see
       _move_into_group), created at the very top of the tree the first time
-      any output lands, so every Matched/Unmatched/Aligned result from one
-      run stays visually bundled together instead of scattered as loose
-      top-level layers.
+      any output lands, so every Matched/Unmatched result from one run stays
+      visually bundled together instead of scattered as loose top-level
+      layers.
     - Hides the original PSA / LGU / Building Point input layers in the
       layer tree as soon as any output from this run has landed, so the map
       view shows the new Matched/Unmatched results instead of the raw
-      source layers underneath them. The Aligned_Barangay_Contested layer,
-      when this run produced one, additionally starts unchecked within the
-      group -- it flags something worth a second look, not the everyday
-      comparison view.
+      source layers underneath them.
     - Loads the HCMGIS "Google Satellite" basemap at the bottom of the
       layer tree (once per project, not per run) so there is imagery to
       compare the boundaries against without the user adding it by hand.
@@ -840,20 +468,17 @@ class _RunCoordinator:
     """
 
     def __init__(self, input_layer_ids, panel_psa_id, panel_lgu_id, panel_building_id,
-                 panel_unmatched_building_id=None, panel_aligned_lgu_id=None,
-                 group_name=None, contested_layer_id=None):
+                 panel_unmatched_building_id=None, group_name=None):
         self.input_layer_ids = [lid for lid in input_layer_ids if lid]
         self.panel_psa_id = panel_psa_id
         self.panel_lgu_id = panel_lgu_id
         self.panel_building_id = panel_building_id
         self.panel_unmatched_building_id = panel_unmatched_building_id
-        self.panel_aligned_lgu_id = panel_aligned_lgu_id
         self.panel_expected = {
             lid for lid in (panel_psa_id, panel_lgu_id, panel_building_id,
-                             panel_unmatched_building_id, panel_aligned_lgu_id) if lid
+                             panel_unmatched_building_id) if lid
         }
         self.group_name = group_name or "PSA - LGU Comparison"
-        self.contested_layer_id = contested_layer_id
         self.group = None
         self.seen = set()
         self.inputs_hidden = False
@@ -881,8 +506,6 @@ class _RunCoordinator:
                 return
             parent = node.parent()
             clone = node.clone()
-            if layer_id == self.contested_layer_id:
-                clone.setItemVisibilityChecked(False)
             self._ensure_group().insertChildNode(0, clone)
             if parent is not None:
                 parent.removeChildNode(node)
@@ -928,7 +551,7 @@ class _RunCoordinator:
             from .psa_lgu_comparison_panel import show_comparison_panel
             show_comparison_panel(
                 iface, self.panel_psa_id, self.panel_lgu_id, self.panel_building_id,
-                self.panel_unmatched_building_id, self.panel_aligned_lgu_id)
+                self.panel_unmatched_building_id)
         except Exception as exc:
             feedback.pushInfo("Could not open the comparison review panel: {}".format(exc))
 
@@ -959,8 +582,7 @@ _PANEL_POST_PROCESSORS = []
 
 def _make_run_post_processors(input_layer_ids, output_layer_ids,
                                panel_psa_id, panel_lgu_id, panel_building_id,
-                               panel_unmatched_building_id=None, panel_aligned_lgu_id=None,
-                               group_name=None, contested_layer_id=None):
+                               panel_unmatched_building_id=None, group_name=None):
     """Return {layer_id: post_processor} for every output layer id this run
     is about to load -- not just the ones the review panel needs -- so that
     hiding the original input layers happens regardless of whether a
@@ -971,7 +593,7 @@ def _make_run_post_processors(input_layer_ids, output_layer_ids,
     multiple LayerDetails."""
     coordinator = _RunCoordinator(
         input_layer_ids, panel_psa_id, panel_lgu_id, panel_building_id,
-        panel_unmatched_building_id, panel_aligned_lgu_id, group_name, contested_layer_id)
+        panel_unmatched_building_id, group_name)
     processors = {}
     for layer_id in output_layer_ids:
         if not layer_id:
@@ -998,8 +620,6 @@ class PsaLguComparisonAlgorithm(QgsProcessingAlgorithm):
     LGU_GEOCODE_FIELD = 'LGU_GEOCODE_FIELD'
     BUILDING_LAYER = 'BUILDING_LAYER'
     BUILDING_GEOCODE_FIELD = 'BUILDING_GEOCODE_FIELD'
-    ALIGN_LGU = 'ALIGN_LGU'
-    ALIGN_MODEL = 'ALIGN_MODEL'
 
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)
@@ -1032,13 +652,10 @@ class PsaLguComparisonAlgorithm(QgsProcessingAlgorithm):
             "differences between the two maps don't matter. If a barangay is made up of several "
             "separate shapes (like islands), they all stay grouped together as one barangay.\n\n"
             "Building Points are checked against the barangay their own geocode names: the point "
-            "must actually fall inside that barangay's boundary (reprojected first when the layers "
-            "use different CRSs) to count as inside. A point labelled with a barangay it does not "
-            "sit in goes to the Outside layer, even when it sits inside the municipality -- that "
-            "mismatch is the error this check exists to find. When LGU boundary alignment (below) "
-            "produced an aligned shape for that barangay, 'inside' means inside the ALIGNED LGU "
-            "shape or the PSA shape it was aligned onto (either one is enough); otherwise it falls "
-            "back to the original LGU shape, same as before alignment existed.\n\n"
+            "must actually fall inside that barangay's LGU boundary (reprojected first when the "
+            "layers use different CRSs) to count as inside. A point labelled with a barangay it "
+            "does not sit in goes to the Outside layer, even when it sits inside the municipality "
+            "-- that mismatch is the error this check exists to find.\n\n"
             "The three layer boxes and their Geocode fields are pre-filled from the layers already "
             "loaded in the project -- a polygon layer named '*PSA*', another named '*LGU*', and a "
             "building-point layer -- skipping this tool's own output layers. Any of them can be "
@@ -1055,69 +672,20 @@ class PsaLguComparisonAlgorithm(QgsProcessingAlgorithm):
             "- Building Points inside LGU Boundary -- green dots: the point falls inside the "
             "barangay its geocode names, and carries that barangay's match_id and geocode\n"
             "- Building Points Outside LGU Boundary -- red dots: geocode_first8 is the point's "
-            "own code, and in_geocode is the barangay it actually sits in -- checked against the "
-            "aligned/PSA shape first, the original LGU shape otherwise -- filled in with a "
-            "different code for a mis-coded point, and left empty for a point that falls outside "
-            "every barangay. Carries match_id (set when the point's own code names the "
-            "barangay under review) and in_match_id (set when it geographically landed inside "
-            "that barangay instead) so the review panel can scope it to one barangay the same "
-            "way it scopes the Matched layers. A point whose own geocode names a barangay from a "
-            "DIFFERENT LGU entirely (not present in either this run's PSA or LGU layer) and that "
-            "doesn't geographically fall inside this LGU either is excluded altogether -- it has "
-            "nothing to do with the boundary being checked here, so it does not pad out this "
-            "layer as a false 'outside' result.\n\n"
-            "LGU boundary alignment (on by default, since old LGU-submitted maps are commonly "
-            "traced from less accurately georeferenced imagery than the PSA boundary): fits ONE "
-            "best-fit transform, shared across every matched barangay, that repositions the whole "
-            "matched LGU boundary onto PSA -- coarsely from the barangay centroids first, then "
-            "refined by an Iterative Closest Point match between the full outlines. It never "
-            "invents shape detail; it only repositions the existing LGU shape as a whole, like "
-            "nudging a tracing into place.\n"
-            "The transform is shared rather than fit per barangay on purpose: two barangays "
-            "independently nudged by slightly different amounts would pull apart at the edge they "
-            "used to share, opening a gap that was never there in the original LGU layer. One "
-            "shared transform maps every polygon by the same linear function, so no gap or overlap "
-            "can open between barangays and no barangay is reshaped relative to its neighbours.\n"
-            "The 'Alignment transform' parameter chooses how much base-image error the fit is "
-            "allowed to absorb. All three keep the LGU boundary's internal shape intact:\n"
-            "- Similarity (default) -- shift + rotate + one uniform scale. Angles and proportions "
-            "preserved exactly, size may change. This is usually the right one: an old base image "
-            "georeferenced at a slightly wrong ground resolution reproduces every distance a "
-            "percent or two off, which shows up as a mismatch that GROWS with distance from the "
-            "middle of the municipality (centre barangays nearly on top of PSA, edge barangays far "
-            "off and all leaning the same way outward or inward). Only a scale change can close "
-            "that.\n"
-            "- Rigid -- shift + rotate only, every distance kept exactly. Use when the LGU "
-            "geometry must not be resized at all; expect a looser fit across a wide municipality "
-            "if there is any scale error to absorb.\n"
-            "- Affine -- shift + rotate + separate x/y scale + shear. Absorbs the most, at the "
-            "cost of no longer preserving angles exactly. Worth trying when Similarity still "
-            "leaves a systematic lean.\n"
-            "Whatever mismatch survives the fit is not a georeferencing artifact -- it is the LGU "
-            "and PSA genuinely disagreeing about where the boundary runs, which is what this tool "
-            "exists to show. The run log reports that leftover gap in metres, on average and for "
-            "the worst barangay.\n"
-            "Once alignment has run, the Building Point inside/outside check "
-            "above uses the aligned shape (OR'd with the PSA shape) instead of the original LGU "
-            "shape -- this is what keeps a building from being wrongly flagged Outside purely "
-            "because the old LGU map's base image was offset from PSA's. This produces two extra "
-            "outputs:\n"
-            "- <code>_LGU_Aligned_Barangay -- white dashed outline: every matched barangay moved "
-            "by the one shared best-fit transform. Included in the review panel's per-barangay "
-            "filter alongside the Matched PSA/LGU layers.\n"
-            "- <code>_LGU_Aligned_Barangay_Contested -- red dashed outline: whichever aligned "
-            "barangay polygons carry a 'boundary' field value of 'Contested' (the convention "
-            "Update Metadata and Gaps/Overlaps already use for an LGU polygon that never resolved "
-            "to an official PSGC barangay), moved out of <code>_LGU_Aligned_Barangay into this "
-            "layer instead -- a Contested polygon has no confirmed PSGC barangay behind it, so it "
-            "does not stay mixed in with the confidently-matched ones. Only created when the "
-            "'boundary' field is present and at least one aligned polygon is flagged.\n\n"
+            "own code, and in_geocode is the barangay it actually sits in (checked against the "
+            "original LGU shape) -- filled in with a different code for a mis-coded point, and "
+            "left empty for a point that falls outside every barangay. Carries match_id (set when "
+            "the point's own code names the barangay under review) and in_match_id (set when it "
+            "geographically landed inside that barangay instead) so the review panel can scope it "
+            "to one barangay the same way it scopes the Matched layers. A point whose own geocode "
+            "names a barangay from a DIFFERENT LGU entirely (not present in either this run's PSA "
+            "or LGU layer) and that doesn't geographically fall inside this LGU either is excluded "
+            "altogether -- it has nothing to do with the boundary being checked here, so it does "
+            "not pad out this layer as a false 'outside' result.\n\n"
             "Every output layer above is moved into one '<code> PSA - LGU Comparison' group at the "
             "top of the Layers panel as it loads, so a run's results stay bundled together above "
             "the original PSA, LGU and Building Point input layers instead of scattered as loose "
-            "top-level layers. The Aligned_Barangay_Contested layer, when created, starts unchecked "
-            "within that group -- it flags something worth a second look, not the everyday "
-            "comparison view. The original input layers are then unchecked in place (not removed, "
+            "top-level layers. The original input layers are then unchecked in place (not removed, "
             "not grouped -- they can be re-checked at any time) so the map view shows only the new "
             "results.\n\n"
             "A 'Google Satellite' basemap (same one as HCMGIS > Basemaps > Google Satellite) is "
@@ -1206,22 +774,6 @@ class PsaLguComparisonAlgorithm(QgsProcessingAlgorithm):
                 defaultValue=find_default_geocode_field(default_building)
             )
         )
-        self.addParameter(
-            QgsProcessingParameterBoolean(
-                self.ALIGN_LGU,
-                self.tr('Align LGU boundary onto PSA boundary (adds Aligned outputs)'),
-                defaultValue=True
-            )
-        )
-        self.addParameter(
-            QgsProcessingParameterEnum(
-                self.ALIGN_MODEL,
-                self.tr('Alignment transform'),
-                options=[self.tr(opt) for opt in ALIGN_MODEL_OPTIONS],
-                defaultValue=0
-            )
-        )
-
     def _resolve_geocode_field(self, layer, selected_field, label, feedback):
         """Return the user-selected geocode field, or auto-detect a field
         literally named "Geocode" on the layer if none was selected."""
@@ -1315,39 +867,6 @@ class PsaLguComparisonAlgorithm(QgsProcessingAlgorithm):
         geom_psa = QgsWkbTypes.displayString(layer_psa.wkbType())
         geom_lgu = QgsWkbTypes.displayString(layer_lgu.wkbType())
 
-        # PSA geometry is mixed with LGU geometry below -- both by the
-        # alignment fit (which measures distances between the two shapes)
-        # and by the Building Point test (which now checks a point against
-        # the PSA shape directly). Both need coordinates in one common CRS
-        # to mean anything; layer_lgu's CRS is the one already used as the
-        # Building Point test's working CRS, so PSA is reprojected into it
-        # here rather than the other way around. None (and every PSA
-        # geometry used as-is) when the two layers already share a CRS, or
-        # when either CRS is undefined and reprojection isn't possible.
-        psa_to_lgu_transform = None
-        if layer_psa.crs() != layer_lgu.crs():
-            if layer_psa.crs().isValid() and layer_lgu.crs().isValid():
-                psa_to_lgu_transform = QgsCoordinateTransform(
-                    layer_psa.crs(), layer_lgu.crs(), QgsProject.instance().transformContext())
-            else:
-                feedback.pushInfo(self.tr(
-                    "Warning: the PSA and LGU layers declare different CRSs but at least one is "
-                    "undefined, so PSA geometry is used as-is for boundary alignment and the "
-                    "Building Point test -- assign a CRS to both layers if either looks wrong."
-                ))
-
-        def _psa_geom_in_lgu_crs(geometry):
-            """Return a copy of *geometry* reprojected into layer_lgu's CRS,
-            or the geometry unchanged when no reprojection is needed/possible."""
-            if psa_to_lgu_transform is None:
-                return geometry
-            out = QgsGeometry(geometry)
-            try:
-                out.transform(psa_to_lgu_transform)
-            except Exception:
-                return geometry
-            return out
-
         # pppmm-style code shared by the PSA and LGU layer names, used to
         # prefix every output layer so outputs from different
         # municipalities/cities don't collide or get confused with each
@@ -1378,15 +897,31 @@ class PsaLguComparisonAlgorithm(QgsProcessingAlgorithm):
         # headless (qgis_process / standalone PyQGIS) where no iface exists.
         MATCH_ID_FIELD_NAME = "match_id"
 
+        # Custom property key the review panel reads back (see
+        # GEOCODE_FIELD_PROPERTY in psa_lgu_comparison_panel.py -- same
+        # duplicated-literal convention as MATCH_ID_FIELD_NAME above) to
+        # find the field appended just below, whatever name it actually
+        # landed under. A blind case-insensitive search for a field named
+        # "geocode" is NOT reliable here the way it is for match_id: unlike
+        # match_id, "geocode" routinely already exists on the source PSA/LGU
+        # layer (Geocode Field auto-detection looks for exactly that name),
+        # so the appended column silently renames to "geocode_2" and a name
+        # search keeps finding the ORIGINAL, untruncated source attribute
+        # instead of this run's first8-truncated one -- which shows up as
+        # the wrong code in the review panel's barangay dropdown label.
+        GEOCODE_FIELD_PROPERTY = "psalgu_geocode_field"
+
         fields_matched_psa = QgsFields(layer_psa.fields())
         match_id_field_psa = _unique_field_name(MATCH_ID_FIELD_NAME, fields_matched_psa)
         fields_matched_psa.append(QgsField(match_id_field_psa, QVariant.Int))
-        fields_matched_psa.append(QgsField(_unique_field_name("geocode", fields_matched_psa), QVariant.String))
+        geocode_field_psa_out = _unique_field_name("geocode", fields_matched_psa)
+        fields_matched_psa.append(QgsField(geocode_field_psa_out, QVariant.String))
 
         fields_matched_lgu = QgsFields(layer_lgu.fields())
         match_id_field_lgu = _unique_field_name(MATCH_ID_FIELD_NAME, fields_matched_lgu)
         fields_matched_lgu.append(QgsField(match_id_field_lgu, QVariant.Int))
-        fields_matched_lgu.append(QgsField(_unique_field_name("geocode", fields_matched_lgu), QVariant.String))
+        geocode_field_lgu_out = _unique_field_name("geocode", fields_matched_lgu)
+        fields_matched_lgu.append(QgsField(geocode_field_lgu_out, QVariant.String))
 
         for label, resolved in (("PSA", match_id_field_psa), ("LGU", match_id_field_lgu)):
             if resolved != MATCH_ID_FIELD_NAME:
@@ -1394,6 +929,14 @@ class PsaLguComparisonAlgorithm(QgsProcessingAlgorithm):
                     f"Warning: the {label} layer already has a '{MATCH_ID_FIELD_NAME}' field, so "
                     f"this run's grouping field was added as '{resolved}' instead -- the review "
                     f"panel's per-barangay filter will not work on this output."
+                ))
+        for label, resolved in (("PSA", geocode_field_psa_out), ("LGU", geocode_field_lgu_out)):
+            if resolved != "geocode":
+                feedback.pushInfo(self.tr(
+                    f"Note: the {label} layer already has a 'geocode' field, so this run's "
+                    f"first-8-digit barangay code was added as '{resolved}' instead. The review "
+                    f"panel is tagged to find it there, so its barangay dropdown label still uses "
+                    f"the correct value rather than the original field."
                 ))
 
         fields_unmatched_psa = QgsFields(layer_psa.fields())
@@ -1418,6 +961,8 @@ class PsaLguComparisonAlgorithm(QgsProcessingAlgorithm):
         matched_psa.updateFields()
         matched_lgu.dataProvider().addAttributes(fields_matched_lgu)
         matched_lgu.updateFields()
+        matched_psa.setCustomProperty(GEOCODE_FIELD_PROPERTY, geocode_field_psa_out)
+        matched_lgu.setCustomProperty(GEOCODE_FIELD_PROPERTY, geocode_field_lgu_out)
 
         # Label matched PSA and LGU shapes with the barangay name from
         # each layer's own "barangay" column -- these are just map
@@ -1487,199 +1032,6 @@ class PsaLguComparisonAlgorithm(QgsProcessingAlgorithm):
         for lyr in (matched_psa, matched_lgu, unmatched_psa, unmatched_lgu):
             lyr.updateExtents()
 
-        # --- LGU boundary alignment: rigid best-fit onto the PSA boundary ---
-        # See the module-level comment above _rigid_fit() for why this
-        # exists, and above _icp_fit() for why every matched barangay
-        # shares ONE rigid transform rather than each fitting its own:
-        # fitting independently can move two barangays that shared an edge
-        # in the original LGU layer by slightly different amounts, opening
-        # a gap (or overlap) where that edge used to be -- exactly what
-        # happened the first time this used a separate ICP fit per
-        # barangay. One shared transform moves the whole matched boundary
-        # as a single rigid shape, so internal adjacency is never disturbed
-        # -- it can end up short of a perfect fit for any one barangay, but
-        # it cannot tear the boundary apart. Output still carries match_id/
-        # geocode per feature so it plugs into the review panel's existing
-        # per-barangay filter the same way Matched LGU does.
-        #
-        # A second output, aligned_lgu_barangay_contested, holds whichever
-        # aligned barangay polygons carry a 'boundary' field value of
-        # 'Contested' -- moved out of the main aligned layer, not just
-        # copied. That field/value pair is the convention the Update
-        # Metadata and Gaps/Overlaps tools already use for an LGU polygon
-        # that never resolved to an official PSGC barangay (see
-        # update_metadata.py); Pass 2 of that tool still backs a Contested
-        # polygon's geocode in from its nearest matched neighbour, so it can
-        # and does turn up here, aligned onto a PSA shape it may not
-        # actually belong to -- it does not belong mixed in with the
-        # confidently-matched barangays in the main aligned layer.
-        align_lgu = self.parameterAsBoolean(parameters, self.ALIGN_LGU, context)
-        model_index = self.parameterAsEnum(parameters, self.ALIGN_MODEL, context)
-        if model_index < 0 or model_index >= len(ALIGN_MODEL_NAMES):
-            model_index = 0
-        name_aligned_barangay = "{}_LGU_Aligned_Barangay".format(code_prefix)
-        name_aligned_contested = "{}_LGU_Aligned_Barangay_Contested".format(code_prefix)
-        aligned_lgu_barangay = QgsVectorLayer(
-            "{}?crs={}".format(geom_lgu, crs_lgu), name_aligned_barangay, "memory")
-        aligned_lgu_contested = QgsVectorLayer(
-            "{}?crs={}".format(geom_lgu, crs_lgu), name_aligned_contested, "memory")
-        aligned_lgu_barangay_feats = []
-        aligned_lgu_contested_feats = []
-        # code -> [aligned QgsGeometry, ...], used below to decide Building
-        # Point inside/outside against the ALIGNED shape instead of the
-        # original one. Populated for every matched barangay regardless of
-        # its Contested flag -- that flag is about PSGC identity confidence,
-        # not about whether the geometric correction is valid.
-        aligned_geoms_by_code = {}
-
-        if align_lgu and pairs:
-            aligned_lgu_barangay.dataProvider().addAttributes(fields_matched_lgu)
-            aligned_lgu_barangay.updateFields()
-            aligned_lgu_contested.dataProvider().addAttributes(fields_matched_lgu)
-            aligned_lgu_contested.updateFields()
-
-            style_aligned_boundary_outline(aligned_lgu_barangay, "white")
-            style_aligned_boundary_outline(aligned_lgu_contested, "red")
-            label_by_field(aligned_lgu_barangay, "barangay", source_suffix="LGU Aligned", color="white")
-            label_by_field(aligned_lgu_contested, "barangay", source_suffix="Contested", color="red")
-
-            # Case-insensitive lookup, matching how gaps_overlaps_checker.py
-            # already reads this same field. None when the LGU layer was
-            # never run through Update Metadata, in which case nothing is
-            # ever flagged Contested below.
-            boundary_field_lgu = next(
-                (f.name() for f in layer_lgu.fields() if f.name().lower() == "boundary"), None)
-
-            # Pass 1: gather each matched barangay's own (small) reference
-            # geometry and vertex list -- ICP still looks each vertex up
-            # against only its own barangay's PSA shape, never a merged
-            # one, so this costs no more per-lookup than the old
-            # per-barangay version did.
-            icp_groups = []            # [(lgu_vertices, psa_reference_geom), ...]
-            icp_codes = []             # parallel to icp_groups, for the residual report
-            centroid_pairs = []        # [((lgu_x,lgu_y), (psa_x,psa_y)), ...] -- coarse fit
-            per_code_lgu_geoms = {}    # code -> [QgsGeometry, ...], reused in Pass 2
-            for match_id, code in pairs:
-                lgu_geoms = [feats_lgu[j].geometry() for j in group_lgu[code]
-                             if feats_lgu[j].hasGeometry() and not feats_lgu[j].geometry().isEmpty()]
-                psa_geoms = [_psa_geom_in_lgu_crs(feats_psa[i].geometry()) for i in group_psa[code]
-                             if feats_psa[i].hasGeometry() and not feats_psa[i].geometry().isEmpty()]
-                if not lgu_geoms or not psa_geoms:
-                    continue
-
-                per_code_lgu_geoms[code] = lgu_geoms
-                psa_reference = QgsGeometry.collectGeometry(psa_geoms)
-                lgu_vertices = []
-                for g in lgu_geoms:
-                    lgu_vertices.extend(_geometry_vertex_list(g))
-                icp_groups.append((lgu_vertices, psa_reference))
-                icp_codes.append(code)
-
-                lgu_centroid = QgsGeometry.collectGeometry(lgu_geoms).centroid().asPoint()
-                psa_centroid = psa_reference.centroid().asPoint()
-                centroid_pairs.append((
-                    (lgu_centroid.x(), lgu_centroid.y()), (psa_centroid.x(), psa_centroid.y())))
-
-            # Pass 2: solve ONE shared transform from every barangay's
-            # correspondences combined, then apply that same transform to
-            # every matched barangay -- see the comment above this block
-            # for why a shared transform (not a per-barangay one) is what
-            # keeps adjacent barangays from pulling apart at a shared edge.
-            #
-            # Coarse first, then refine: the barangay centroid pairs give a
-            # cheap starting transform that already has the bulk of the
-            # shift, rotation and scale in it, and ICP then refines it
-            # against the full outlines. Handing ICP that starting point
-            # rather than the identity is what stops a large initial offset
-            # from pairing vertices with the wrong stretch of PSA boundary.
-            coeff_fit = (_similarity_coeffs, _rigid_coeffs, _affine_coeffs)[model_index]
-
-            coarse = coeff_fit(centroid_pairs)
-            if coarse is None:
-                # Too few (or collinear) barangay centroids for the chosen
-                # model -- step down through the simpler ones rather than
-                # give up on aligning at all.
-                coarse = _similarity_coeffs(centroid_pairs) or _rigid_coeffs(centroid_pairs)
-            if coarse is None and centroid_pairs:
-                coarse = _translation_coeffs(*centroid_pairs[0])
-
-            coeffs = _icp_fit(icp_groups, coeff_fit, coarse) or coarse
-
-            if coeffs is not None:
-                for match_id, code in pairs:
-                    if code not in per_code_lgu_geoms:
-                        continue
-                    for j in group_lgu[code]:
-                        fl = feats_lgu[j]
-                        aligned_geom = _apply_affine_transform(fl.geometry(), coeffs)
-                        aligned_geoms_by_code.setdefault(code, []).append(aligned_geom)
-                        out_f = QgsFeature(aligned_lgu_barangay.fields())
-                        out_f.setGeometry(aligned_geom)
-                        out_f.setAttributes(fl.attributes() + [match_id, code])
-
-                        is_contested = (boundary_field_lgu
-                                         and str(fl[boundary_field_lgu] or "").strip().lower() == "contested")
-                        if is_contested:
-                            # Moved, not copied: a Contested polygon has no
-                            # confirmed PSGC barangay behind it, so it does
-                            # not belong in the "these barangays matched
-                            # and got aligned" layer -- only in the
-                            # Contested one.
-                            aligned_lgu_contested_feats.append(out_f)
-                        else:
-                            aligned_lgu_barangay_feats.append(out_f)
-
-                shift, rotation, scale = _describe_coeffs(coeffs, _centroid(
-                    [p[0] for p in centroid_pairs]))
-                feedback.pushInfo(self.tr(
-                    "LGU boundary alignment: fit one shared {} transform across {} matched "
-                    "barangay(s) -- shift {:.1f} m, rotation {:.3f} deg, scale {:.5f} "
-                    "({:+.2f}% in size). Every barangay is mapped by that same transform, so "
-                    "shared edges between them stay intact.".format(
-                        ALIGN_MODEL_NAMES[model_index], len(centroid_pairs),
-                        shift, rotation, scale, (scale - 1.0) * 100.0)
-                ))
-
-                # How far the aligned boundary still sits from PSA, per
-                # barangay. Whatever survives the fit is no longer a
-                # base-image artifact -- one global transform has already
-                # taken out everything shift, rotation and scale can
-                # explain -- so what is left is the LGU and PSA genuinely
-                # disagreeing about where the line runs. That is the number
-                # worth reading, and the barangay named as worst is the one
-                # to look at first.
-                residuals = []
-                for code, (lgu_vertices, psa_reference) in zip(icp_codes, icp_groups):
-                    if not lgu_vertices:
-                        continue
-                    total = 0.0
-                    for x, y in lgu_vertices:
-                        cx, cy = _apply_coeffs(coeffs, x, y)
-                        sq_dist, _pt, _after, _side = psa_reference.closestSegmentWithContext(
-                            QgsPointXY(cx, cy))
-                        total += math.sqrt(max(sq_dist, 0.0))
-                    residuals.append((code, total / len(lgu_vertices)))
-                if residuals:
-                    worst_code, worst_residual = max(residuals, key=lambda r: r[1])
-                    mean_residual = sum(r for _c, r in residuals) / len(residuals)
-                    feedback.pushInfo(self.tr(
-                        "  Remaining gap after alignment: {:.1f} m on average, worst barangay {} "
-                        "at {:.1f} m. This is what the two maps actually disagree about -- "
-                        "shift/rotation/scale error has already been taken out.".format(
-                            mean_residual, worst_code, worst_residual)
-                    ))
-            if aligned_lgu_contested_feats:
-                feedback.pushInfo(self.tr(
-                    "LGU boundary alignment: {} aligned polygon(s) are flagged 'Contested' in the "
-                    "boundary field -- moved to {} instead of {}.".format(
-                        len(aligned_lgu_contested_feats), name_aligned_contested, name_aligned_barangay)
-                ))
-
-        aligned_lgu_barangay.dataProvider().addFeatures(aligned_lgu_barangay_feats)
-        aligned_lgu_contested.dataProvider().addFeatures(aligned_lgu_contested_feats)
-        aligned_lgu_barangay.updateExtents()
-        aligned_lgu_contested.updateExtents()
-
         feedback.setProgress(50)
 
         # --- Building Point classification: does each point fall inside ---
@@ -1690,17 +1042,6 @@ class PsaLguComparisonAlgorithm(QgsProcessingAlgorithm):
         # outside the outline they are reviewed under; geometry alone
         # (anywhere in the municipality) passes practically every point and
         # leaves the Outside layer empty.
-        #
-        # Which geometry decides "inside": when the barangay has an ALIGNED
-        # LGU shape (see above), a point counts as inside when it falls in
-        # EITHER the aligned LGU shape OR the PSA shape it was aligned onto
-        # -- the alignment step exists specifically to correct for LGU/PSA
-        # base-image registration error, so once that correction exists for
-        # a barangay, it (and the PSA shape it targets) is what should
-        # decide inside/outside, not the original, potentially-offset LGU
-        # polygon. A barangay with no aligned shape (alignment turned off,
-        # or no PSA counterpart to align onto in the first place) falls
-        # back to the original LGU-only test, unchanged from before.
         # first8 code -> match_id (first barangay group wins on a rare collision)
         code8_to_match_id = {}
         for mid, codes in geocode_values_by_match.items():
@@ -1775,34 +1116,17 @@ class PsaLguComparisonAlgorithm(QgsProcessingAlgorithm):
         if lgu_locator.is_empty():
             feedback.pushInfo(self.tr(
                 "Warning: the LGU layer has no usable polygon geometry -- every building "
-                "point falls back to being tested against the aligned/PSA boundary only, "
-                "where one exists, or is otherwise reported outside."
+                "point is reported outside."
             ))
 
-        psa_locator = _LguBoundaryLocator()
-        for fp, code in zip(feats_psa, code_psa):
-            psa_locator.add_geometry(_psa_geom_in_lgu_crs(fp.geometry()), code)
-
-        aligned_locator = _LguBoundaryLocator()
-        for code, geoms in aligned_geoms_by_code.items():
-            for g in geoms:
-                aligned_locator.add_geometry(g, code)
-
         def point_is_inside(code8, test_geom):
-            """True when *test_geom* counts as inside the barangay named by
-            *code8*, per the aligned-shape-first rule described above."""
-            if code8 in aligned_geoms_by_code:
-                return (aligned_locator.contains(code8, test_geom)
-                        or psa_locator.contains(code8, test_geom))
+            """True when *test_geom* falls inside the LGU polygon(s) carrying
+            first-8 geocode *code8*."""
             return lgu_locator.contains(code8, test_geom)
 
         def point_landed_in(test_geom):
-            """Which barangay *test_geom* actually sits in, checking the
-            aligned/PSA shapes first (the more trustworthy geometry when it
-            exists) and falling back to the original LGU shapes."""
-            return (aligned_locator.code_for(test_geom)
-                    or psa_locator.code_for(test_geom)
-                    or lgu_locator.code_for(test_geom))
+            """Which barangay's LGU polygon *test_geom* actually sits in."""
+            return lgu_locator.code_for(test_geom)
 
         # The test runs in the LGU layer's CRS, so a building layer in a
         # different CRS is reprojected first. Comparing raw coordinates from
@@ -1943,8 +1267,6 @@ class PsaLguComparisonAlgorithm(QgsProcessingAlgorithm):
                 (unmatched_lgu.id(), unmatched_lgu_feats),
                 (matched_building.id(), matched_building_feats),
                 (unmatched_building.id(), unmatched_building_feats),
-                (aligned_lgu_barangay.id(), aligned_lgu_barangay_feats),
-                (aligned_lgu_contested.id(), aligned_lgu_contested_feats),
             ) if has_feats or lid in always_load
         ]
 
@@ -1961,13 +1283,11 @@ class PsaLguComparisonAlgorithm(QgsProcessingAlgorithm):
         panel_lgu_id = matched_lgu.id() if have_panel else None
         panel_building_id = matched_building.id() if have_panel and matched_building_feats else None
         panel_unmatched_building_id = unmatched_building.id() if have_panel else None
-        panel_aligned_lgu_id = aligned_lgu_barangay.id() if have_panel and aligned_lgu_barangay_feats else None
-        contested_layer_id = aligned_lgu_contested.id() if aligned_lgu_contested_feats else None
         run_processors = _make_run_post_processors(
             (layer_psa.id(), layer_lgu.id(), building_layer.id()),
             output_layer_ids, panel_psa_id, panel_lgu_id, panel_building_id,
-            panel_unmatched_building_id, panel_aligned_lgu_id,
-            group_name="{} PSA - LGU Comparison".format(code_prefix), contested_layer_id=contested_layer_id)
+            panel_unmatched_building_id,
+            group_name="{} PSA - LGU Comparison".format(code_prefix))
 
         results = {
             'MATCHED_PSA': load_layer(
@@ -1988,12 +1308,6 @@ class PsaLguComparisonAlgorithm(QgsProcessingAlgorithm):
             'UNMATCHED_BUILDING': load_layer(
                 unmatched_building, "Building Points Outside LGU Boundary",
                 run_processors.get(unmatched_building.id())),
-            'ALIGNED_LGU_BARANGAY': load_layer(
-                aligned_lgu_barangay, name_aligned_barangay,
-                run_processors.get(aligned_lgu_barangay.id())) if aligned_lgu_barangay_feats else None,
-            'ALIGNED_LGU_BARANGAY_CONTESTED': load_layer(
-                aligned_lgu_contested, name_aligned_contested,
-                run_processors.get(aligned_lgu_contested.id())) if aligned_lgu_contested_feats else None,
         }
 
         feedback.setProgress(100)

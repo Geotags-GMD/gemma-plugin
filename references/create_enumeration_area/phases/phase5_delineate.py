@@ -25,6 +25,111 @@ from ..helpers.geometry import (
 )
 
 
+def extract_proposed_cut_line(split_parts: List[Dict[str, Any]], parent_geom: QgsGeometry = None) -> QgsGeometry:
+    """Extract and merge internal cut lines between split sub-polygons."""
+    if not split_parts or len(split_parts) < 2:
+        return None
+    shared_edges = []
+    for p_i in range(len(split_parts)):
+        for p_j in range(p_i + 1, len(split_parts)):
+            geom_i = split_parts[p_i].get('geom')
+            geom_j = split_parts[p_j].get('geom')
+            if not geom_i or not geom_j or geom_i.isEmpty() or geom_j.isEmpty():
+                continue
+            shared = geom_i.intersection(geom_j)
+            if shared is None or shared.isEmpty():
+                continue
+            flat = QgsWkbTypes.flatType(shared.wkbType())
+            if flat in (QgsWkbTypes.LineString, QgsWkbTypes.MultiLineString):
+                shared_edges.append(shared)
+            elif flat == QgsWkbTypes.GeometryCollection or shared.isMultipart():
+                try:
+                    for sub_part in shared.constParts():
+                        sub_geom = QgsGeometry(sub_part.clone())
+                        ptype = QgsWkbTypes.flatType(sub_geom.wkbType())
+                        if ptype in (QgsWkbTypes.LineString, QgsWkbTypes.MultiLineString):
+                            shared_edges.append(sub_geom)
+                except Exception:
+                    pass
+
+    if not shared_edges:
+        return None
+
+    all_shared = QgsGeometry.unaryUnion(shared_edges)
+    if all_shared is None or all_shared.isEmpty():
+        return None
+
+    merged = all_shared.mergeLines()
+    if merged is None or merged.isEmpty():
+        merged = all_shared
+
+    if parent_geom is not None and not parent_geom.isEmpty():
+        clipped = merged.intersection(parent_geom)
+        if clipped is not None and not clipped.isEmpty():
+            merged = clipped
+
+    return merged
+
+
+def enforce_min_household_parts(parts, fback, min_household=100, max_household=300, ea_geom=None):
+    while len(parts) > 1:
+        under = [i for i, p in enumerate(parts) if p['hh_count'] < min_household]
+        if not under:
+            break
+        under.sort(key=lambda i: parts[i]['hh_count'])
+        up_idx = under[0]
+        up = parts[up_idx]
+
+        best_idx = -1
+        best_overlap = -1.0
+        for j, nb in enumerate(parts):
+            if j == up_idx:
+                continue
+            if up['geom'].intersects(nb['geom']) or up['geom'].touches(nb['geom']):
+                inter = up['geom'].intersection(nb['geom'])
+                overlap = inter.length() if not inter.isEmpty() else 0.0
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_idx = j
+
+        if best_idx == -1:
+            up_centroid = up['geom'].centroid().asPoint()
+            best_dist = float('inf')
+            best_dist_over = float('inf')
+            best_idx_over = -1
+            for j, nb in enumerate(parts):
+                if j == up_idx:
+                    continue
+                dist = math.hypot(up_centroid.x() - nb['geom'].centroid().asPoint().x(), up_centroid.y() - nb['geom'].centroid().asPoint().y())
+                combined = up['hh_count'] + nb['hh_count']
+                if combined <= max_household:
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_idx = j
+                else:
+                    if dist < best_dist_over:
+                        best_dist_over = dist
+                        best_idx_over = j
+            if best_idx == -1:
+                best_idx = best_idx_over
+
+        if best_idx == -1:
+            break
+
+        nb = parts[best_idx]
+        raw_combined = nb['geom'].combine(up['geom']).buffer(0.0, 3)
+        if ea_geom is not None:
+            clipped = raw_combined.intersection(ea_geom).buffer(0.0, 3)
+            nb['geom'] = clipped if not clipped.isEmpty() else raw_combined
+        else:
+            nb['geom'] = raw_combined
+        nb['buildings'].extend(up['buildings'])
+        nb['hh_count'] += up['hh_count']
+        nb['bldg_count'] = len(nb['buildings'])
+        parts.pop(up_idx)
+    return parts
+
+
 def force_geometric_split(ea_item, target_pop, fback, min_household=100, max_household=300):
     hh_cnt = ea_item['hh_count']
     bldgs = ea_item.get('buildings', [])
@@ -118,11 +223,11 @@ def force_geometric_split(ea_item, target_pop, fback, min_household=100, max_hou
             best_nb['buildings'].extend(zp['buildings'])
             best_nb['bldg_count'] = len(best_nb['buildings'])
 
-        parts = nonzero_parts
+        parts = enforce_min_household_parts(nonzero_parts, fback, min_household=min_household, max_household=max_household, ea_geom=ea_item['geom'])
         if len(parts) < 2:
             continue
 
-        all_valid = all(p['hh_count'] <= max_household for p in parts)
+        all_valid = all(min_household <= p['hh_count'] <= max_household for p in parts)
 
         if accepted_parts is None or all_valid:
             accepted_parts = parts
@@ -135,7 +240,8 @@ def force_geometric_split(ea_item, target_pop, fback, min_household=100, max_hou
     if accepted_parts is None:
         fback.pushWarning(
             f"[EA {ea_item['original_code']}] FORCED SPLIT: Could not produce >= 2 valid "
-            f"parts at any k ({k_start}–{k_max}). EA will remain over threshold."
+            f"parts at any k ({k_start}–{k_max}) meeting min threshold ({min_household} HH). "
+            f"EA will remain whole."
         )
         return [ea_item]
 
@@ -152,6 +258,15 @@ def force_geometric_split(ea_item, target_pop, fback, min_household=100, max_hou
                 final_parts.append(part)
         else:
             final_parts.append(part)
+
+    final_parts = enforce_min_household_parts(final_parts, fback, min_household=min_household, max_household=max_household, ea_geom=ea_item['geom'])
+
+    if len(final_parts) < 2 or any(p['hh_count'] < min_household for p in final_parts):
+        fback.pushWarning(
+            f"[EA {ea_item['original_code']}] FORCED SPLIT: Resulting sub-polygons fall below min threshold "
+            f"({min_household} HH). Keeping EA whole."
+        )
+        return [ea_item]
 
     orig_code_str = str(ea_item['original_code']).strip() if ea_item['original_code'] is not None else "000"
     digits = "".join([c for c in orig_code_str if c.isdigit()])
@@ -173,65 +288,6 @@ def force_geometric_split(ea_item, target_pop, fback, min_household=100, max_hou
         f"strip split (k={accepted_k}) — EA (hh_count={hh_cnt}) → {len(final_parts)} part(s)."
     )
     return final_parts
-
-
-def enforce_min_household_parts(parts, fback, min_household=100, max_household=300, ea_geom=None):
-    while len(parts) > 1:
-        under = [i for i, p in enumerate(parts) if p['hh_count'] <= min_household]
-        if not under:
-            break
-        under.sort(key=lambda i: parts[i]['hh_count'])
-        up_idx = under[0]
-        up = parts[up_idx]
-
-        best_idx = -1
-        best_overlap = -1.0
-        for j, nb in enumerate(parts):
-            if j == up_idx:
-                continue
-            if up['geom'].intersects(nb['geom']) or up['geom'].touches(nb['geom']):
-                inter = up['geom'].intersection(nb['geom'])
-                overlap = inter.length() if not inter.isEmpty() else 0.0
-                if overlap > best_overlap:
-                    best_overlap = overlap
-                    best_idx = j
-
-        if best_idx == -1:
-            up_centroid = up['geom'].centroid().asPoint()
-            best_dist = float('inf')
-            best_dist_over = float('inf')
-            best_idx_over = -1
-            for j, nb in enumerate(parts):
-                if j == up_idx:
-                    continue
-                dist = math.hypot(up_centroid.x() - nb['geom'].centroid().asPoint().x(), up_centroid.y() - nb['geom'].centroid().asPoint().y())
-                combined = up['hh_count'] + nb['hh_count']
-                if combined <= max_household:
-                    if dist < best_dist:
-                        best_dist = dist
-                        best_idx = j
-                else:
-                    if dist < best_dist_over:
-                        best_dist_over = dist
-                        best_idx_over = j
-            if best_idx == -1:
-                best_idx = best_idx_over
-
-        if best_idx == -1:
-            break
-
-        nb = parts[best_idx]
-        raw_combined = nb['geom'].combine(up['geom']).buffer(0.0, 3)
-        if ea_geom is not None:
-            clipped = raw_combined.intersection(ea_geom).buffer(0.0, 3)
-            nb['geom'] = clipped if not clipped.isEmpty() else raw_combined
-        else:
-            nb['geom'] = raw_combined
-        nb['buildings'].extend(up['buildings'])
-        nb['hh_count'] += up['hh_count']
-        nb['bldg_count'] = len(nb['buildings'])
-        parts.pop(up_idx)
-    return parts
 
 
 def verify_point_cluster_alignment(bldgs, bbox=None, target_pop=200, k_val=2):
@@ -642,6 +698,30 @@ def run_phase_5(alg, parameters, context, feedback, multi_feedback, p1, p2, p3, 
                             best_idx_over = j
                 if best_idx == -1:
                     best_idx = best_idx_over
+
+            # Fallback 1: Allow touching / intersecting neighbor even if candidate
+            if best_idx == -1:
+                for j, nb in enumerate(parts):
+                    if j == up_idx:
+                        continue
+                    if up['geom'].intersects(nb['geom']) or up['geom'].touches(nb['geom']):
+                        inter = up['geom'].intersection(nb['geom'])
+                        overlap = inter.length() if not inter.isEmpty() else 0.0
+                        if overlap > best_overlap:
+                            best_overlap = overlap
+                            best_idx = j
+
+            # Fallback 2: Nearest neighbor by centroid
+            if best_idx == -1:
+                up_centroid = up['geom'].centroid().asPoint()
+                best_dist = float('inf')
+                for j, nb in enumerate(parts):
+                    if j == up_idx:
+                        continue
+                    dist = up_centroid.distance(nb['geom'].centroid().asPoint())
+                    if dist < best_dist:
+                        best_dist = dist
+                        best_idx = j
 
             if best_idx == -1:
                 break
@@ -1068,7 +1148,7 @@ def run_phase_5(alg, parameters, context, feedback, multi_feedback, p1, p2, p3, 
             if len(parts) < 2:
                 continue
 
-            all_valid = all(p['hh_count'] <= max_household for p in parts)
+            all_valid = all(min_household <= p['hh_count'] <= max_household for p in parts)
 
             if accepted_parts is None or all_valid:
                 accepted_parts = parts
@@ -1084,11 +1164,11 @@ def run_phase_5(alg, parameters, context, feedback, multi_feedback, p1, p2, p3, 
             if len(half_strips) < 2:
                 half_strips = make_strips(2, horizontal=not use_horizontal)
             if len(half_strips) >= 2:
-                accepted_parts = []
+                half_parts = []
                 for sp in half_strips:
                     sp_bldgs = [b for b in bldgs if sp.contains(QgsGeometry.fromPointXY(b['point'])) or sp.intersects(QgsGeometry.fromPointXY(b['point']))]
                     sp_pop = sum(b['pop'] for b in sp_bldgs)
-                    accepted_parts.append({
+                    half_parts.append({
                         'geom': sp,
                         'buildings': sp_bldgs,
                         'hh_count': sp_pop,
@@ -1104,8 +1184,17 @@ def run_phase_5(alg, parameters, context, feedback, multi_feedback, p1, p2, p3, 
                         'split_by': 'forced_grid',
                         'parent_barangay': ea_item['parent_barangay']
                     })
-                accepted_k = 2
-                accepted_orientation = 'horizontal' if use_horizontal else 'vertical'
+                half_parts = enforce_min_household(half_parts, fback, ea_geom=ea_item['geom'])
+                if len(half_parts) >= 2 and all(p['hh_count'] >= min_household for p in half_parts):
+                    accepted_parts = half_parts
+                    accepted_k = 2
+                    accepted_orientation = 'horizontal' if use_horizontal else 'vertical'
+                else:
+                    fback.pushWarning(
+                        f"[EA {ea_item['original_code']}] FORCED SPLIT: Fail-safe half split cannot meet "
+                        f"min threshold ({min_household} HH). EA will remain whole."
+                    )
+                    return [ea_item]
             else:
                 fback.pushWarning(
                     f"[EA {ea_item['original_code']}] FORCED SPLIT: Could not produce >= 2 valid "
@@ -1126,6 +1215,14 @@ def run_phase_5(alg, parameters, context, feedback, multi_feedback, p1, p2, p3, 
                     final_parts.append(part)
             else:
                 final_parts.append(part)
+
+        final_parts = enforce_min_household(final_parts, fback, ea_geom=ea_item['geom'])
+        if len(final_parts) < 2 or any(p['hh_count'] < min_household for p in final_parts):
+            fback.pushWarning(
+                f"[EA {ea_item['original_code']}] FORCED SPLIT: Resulting sub-polygons fall below min threshold "
+                f"({min_household} HH). Keeping EA whole."
+            )
+            return [ea_item]
 
         orig_code_str = str(ea_item['original_code']).strip() if ea_item['original_code'] is not None else "000"
         digits = "".join([c for c in orig_code_str if c.isdigit()])
@@ -1457,8 +1554,11 @@ def run_phase_5(alg, parameters, context, feedback, multi_feedback, p1, p2, p3, 
             p['bldgpoints_value'] = p['hh_count'] / p['bldg_count'] if p['bldg_count'] > 0 else 0.0
             p['split_by'] = split_by
 
-        # Reject the split if any resulting part falls below the min_household threshold (Strict Threshold mode only)
-        if split_strategy == 1 and any(p['hh_count'] < min_household for p in final_parts):
+        if any(p['hh_count'] < min_household for p in final_parts):
+            final_parts = enforce_min_household(final_parts, fback, ea_geom=parent_geom)
+
+        # Reject the split if any resulting part falls below the min_household threshold or fewer than 2 parts
+        if len(final_parts) < 2 or any(p['hh_count'] < min_household for p in final_parts):
             under_parts = [p for p in final_parts if p['hh_count'] < min_household]
             fback.pushWarning(
                 f"[EA {ea_item['original_code']}] Hybrid split rejected: "
@@ -1613,8 +1713,11 @@ def run_phase_5(alg, parameters, context, feedback, multi_feedback, p1, p2, p3, 
 
         final_parts, _ = allocate_gaps_to_parts(final_parts, parent_geom)
 
-        # Reject the split if any resulting part falls below the min_household threshold (Strict Threshold mode only)
-        if split_strategy == 1 and any(p['hh_count'] < min_household for p in final_parts):
+        if any(p['hh_count'] < min_household for p in final_parts):
+            final_parts = enforce_min_household(final_parts, fback, ea_geom=parent_geom)
+
+        # Reject the split if any resulting part falls below the min_household threshold or fewer than 2 parts
+        if len(final_parts) < 2 or any(p['hh_count'] < min_household for p in final_parts):
             under_parts = [p for p in final_parts if p['hh_count'] < min_household]
             fback.pushWarning(
                 f"[EA {ea_item['original_code']}] Building-cluster split rejected: "
@@ -1709,89 +1812,98 @@ def run_phase_5(alg, parameters, context, feedback, multi_feedback, p1, p2, p3, 
         return [ea_item]
 
     def process_barangay_split(bar_code, bar_eas, fback):
-        iteration = 0
-        max_iterations = 5
-        changed = True
+        processed_eas = []
+        bar_proposed_lines = []
 
-        while changed and iteration < max_iterations:
+        for ea in bar_eas:
             if fback.isCanceled():
                 break
 
-            has_overs = False
-            for ea in bar_eas:
-                if is_delineation_candidate(ea):
-                    has_overs = True
-                    break
+            if not is_delineation_candidate(ea):
+                processed_eas.append(ea)
+                continue
 
-            if not has_overs:
-                break
+            # Mode 4 or Strategy 2: Keep Whole (No Splitting)
+            if split_type == 4 or split_strategy == 2:
+                fback.pushInfo(f"[EA {ea['original_code']}] Strategy 'Keep Whole' selected. Preserving EA whole.")
+                ea['remarks'] = ""
+                processed_eas.append(ea)
+                continue
 
-            overs = []
-            for idx, ea in enumerate(bar_eas):
-                if is_delineation_candidate(ea):
-                    overs.append(idx)
-
-            changed = False
-
-            if overs:
-                new_eas = []
-                for idx in range(len(bar_eas)):
-                    if idx in overs:
-                        ea = bar_eas[idx]
-                        if ea.get('from_merge', False):
-                            new_eas.append(ea)
+            split_parts = split_ea(ea, max_household, fback)
+            if len(split_parts) > 1:
+                _ea_id = ea.get('original_id')
+                _ea_ean = str(ea.get('original_code', '')).strip()
+                _max_part_hh = max(p['hh_count'] for p in split_parts) if split_parts else 0
+                if _max_part_hh > max_household:
+                    fback.pushWarning(
+                        f"[Barangay {bar_code}] [EA {ea['original_code']}] "
+                        f"Part exceeds max_household ({_max_part_hh} > {max_household}). "
+                        f"Re-delineating over-threshold sub-polygons to enforce {min_household}–{max_household} HH range."
+                    )
+                    sub_divided = []
+                    for p in split_parts:
+                        if p['hh_count'] > max_household:
+                            sub_p = split_ea_by_building_clusters(p, max_household, fback)
+                            sub_divided.extend(sub_p)
                         else:
-                            split_parts = split_ea(ea, max_household, fback)
-                            if len(split_parts) > 1:
-                                _ea_id = ea.get('original_id')
-                                _ea_ean = str(ea.get('original_code', '')).strip()
-                                _max_part_hh = max(p['hh_count'] for p in split_parts) if split_parts else 0
-                                if _max_part_hh > max_household:
-                                    fback.pushWarning(
-                                        f"[Barangay {bar_code}] [EA {ea['original_code']}] "
-                                        f"Part exceeds max_household ({_max_part_hh} > {max_household}). "
-                                        f"Re-delineating over-threshold sub-polygons to enforce {min_household}–{max_household} HH range."
-                                    )
-                                    sub_divided = []
-                                    for p in split_parts:
-                                        if p['hh_count'] > max_household:
-                                            sub_p = split_ea_by_building_clusters(p, max_household, fback)
-                                            sub_divided.extend(sub_p)
-                                        else:
-                                            sub_divided.append(p)
-                                    split_parts = enforce_min_household(sub_divided, fback, ea_geom=ea['geom'])
-                                new_eas.extend(split_parts)
-                                changed = True
-                                fback.pushInfo(f"[Barangay {bar_code}] Split over-populated EA (code={ea['original_code']}, pop={ea['hh_count']}) into {len(split_parts)} sub-polygons.")
-                            else:
-                                new_eas.append(ea)
+                            sub_divided.append(p)
+                    split_parts = enforce_min_household(sub_divided, fback, ea_geom=ea['geom'])
+
+                if any(p['hh_count'] < min_household for p in split_parts):
+                    split_parts = enforce_min_household(split_parts, fback, ea_geom=ea['geom'])
+
+                if len(split_parts) > 1 and all(p['hh_count'] >= min_household for p in split_parts):
+                    cut_line = extract_proposed_cut_line(split_parts, parent_geom=ea['geom'])
+                    if cut_line and not cut_line.isEmpty():
+                        bar_proposed_lines.append({
+                            'ea_id': ea.get('original_id'),
+                            'geom': cut_line,
+                            'parent_ea': ea,
+                            'split_by': split_parts[0].get('split_by', 'voronoi'),
+                            'num_parts': len(split_parts),
+                            'part_hh_counts': [p['hh_count'] for p in split_parts],
+                        })
+                        ea['has_proposed_split'] = True
+                        ea['proposed_parts_count'] = len(split_parts)
+                        ea['proposed_split_by'] = split_parts[0].get('split_by', 'voronoi')
+                        ea['remarks'] = "Proposed for delineation"
+                        fback.pushInfo(
+                            f"[Barangay {bar_code}] Generated proposed boundary cut line for over-populated EA "
+                            f"(code={ea['original_code']}, pop={ea['hh_count']}) into {len(split_parts)} proposed parts."
+                        )
                     else:
-                        new_eas.append(bar_eas[idx])
-                bar_eas = new_eas
-                if changed:
-                    iteration += 1
-                    continue
+                        fback.pushWarning(
+                            f"[Barangay {bar_code}] [EA {ea['original_code']}] "
+                            f"Could not extract proposed boundary cut line geometry. Preserving EA whole."
+                        )
+                else:
+                    fback.pushWarning(
+                        f"[Barangay {bar_code}] [EA {ea['original_code']}] "
+                        f"Split rejected because resulting sub-polygon(s) fall below min threshold ({min_household} HH). Preserving EA whole."
+                    )
+            else:
+                unique_pt_count = len(set((b['point'].x(), b['point'].y()) for b in ea.get('buildings', [])))
+                reason = []
+                if unique_pt_count < 2:
+                    reason.append(f"only {unique_pt_count} unique building point(s) — Voronoi cannot split")
+                if unique_pt_count >= 2:
+                    k_needed = max(2, int(round(ea['hh_count'] / float(target_household))))
+                    if k_needed > unique_pt_count:
+                        reason.append(f"k={k_needed} required but only {unique_pt_count} unique points available")
+                if not reason:
+                    reason.append("splitting returned 1 part — check sliver threshold vs cell size")
+                fback.pushWarning(
+                    f"[Barangay {bar_code}] UNRESOLVED OVER-THRESHOLD: EA (code={ea['original_code']}, "
+                    f"hh_count={ea['hh_count']}, bldg_count={ea.get('bldg_count',0)}, "
+                    f"unique_pts={unique_pt_count}). "
+                    f"Reason: {'; '.join(reason)}. Preserving EA whole."
+                )
 
-        remaining_overs = [ea for ea in bar_eas if is_delineation_candidate(ea)]
-        for ea in remaining_overs:
-            unique_pt_count = len(set((b['point'].x(), b['point'].y()) for b in ea.get('buildings', [])))
-            reason = []
-            if unique_pt_count < 2:
-                reason.append(f"only {unique_pt_count} unique building point(s) — Voronoi cannot split")
-            if unique_pt_count >= 2:
-                k_needed = max(2, int(round(ea['hh_count'] / float(target_household))))
-                if k_needed > unique_pt_count:
-                    reason.append(f"k={k_needed} required but only {unique_pt_count} unique points available")
-            if not reason:
-                reason.append("splitting consistently returned 1 part — check sliver threshold vs cell size")
-            fback.pushWarning(
-                f"[Barangay {bar_code}] UNRESOLVED OVER-THRESHOLD: EA (code={ea['original_code']}, "
-                f"hh_count={ea['hh_count']}, bldg_count={ea.get('bldg_count',0)}, "
-                f"unique_pts={unique_pt_count}) after {iteration} iteration(s). "
-                f"Reason: {'; '.join(reason)}."
-            )
+            # Preserve parent EA whole without splitting polygon
+            processed_eas.append(ea)
 
-        return bar_eas
+        return processed_eas, bar_proposed_lines
 
     feedback.pushInfo("Running normal delineation...")
 
@@ -1816,10 +1928,11 @@ def run_phase_5(alg, parameters, context, feedback, multi_feedback, p1, p2, p3, 
     )
 
     def process_barangay_split_wrapper(bar_code, bar_eas, parent_feedback):
-        result = process_barangay_split(bar_code, bar_eas, parent_feedback)
-        return result, []
+        result_eas, prop_lines = process_barangay_split(bar_code, bar_eas, parent_feedback)
+        return (result_eas, prop_lines), []
 
     split_eas = []
+    all_proposed_lines = []
 
     if split_bar_keys:
         with concurrent.futures.ThreadPoolExecutor(max_workers=num_cores) as executor:
@@ -1855,15 +1968,16 @@ def run_phase_5(alg, parameters, context, feedback, multi_feedback, p1, p2, p3, 
                         split_eas.extend(barangay_groups[bar_code])
                         continue
                     try:
-                        result, logs = future.result()
+                        (result, prop_lines), logs = future.result()
                         split_eas.extend(result)
+                        all_proposed_lines.extend(prop_lines)
                         for log_type, msg in logs:
                             if log_type == 'info':
                                 feedback.pushInfo(msg)
                             elif log_type == 'warning':
                                 feedback.pushWarning(msg)
                     except Exception as e:
-                        feedback.reportError(f"Error splitting Barangay {bar_code}: {str(e)}")
+                        feedback.reportError(f"Error processing proposed delineation for Barangay {bar_code}: {str(e)}")
                 else:
                     split_eas.extend(barangay_groups[bar_code])
     else:
@@ -1876,5 +1990,6 @@ def run_phase_5(alg, parameters, context, feedback, multi_feedback, p1, p2, p3, 
         raise QgsProcessingException("Algorithm cancelled by user.")
 
     return {
-        "split_eas": split_eas
+        "split_eas": split_eas,
+        "proposed_lines": all_proposed_lines,
     }

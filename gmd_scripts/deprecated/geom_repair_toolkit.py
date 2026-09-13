@@ -1,3 +1,41 @@
+# -*- coding: utf-8 -*-
+"""
+Geometry Repair Toolkit (Interactive Dialog)
+
+A standalone interactive QGIS tool for topology inspection, canvas-level error
+highlighting, and in-place automated repair of polygon vector layers.
+
+Overview:
+    This module provides a GUI dialog (CheckerTab) coupled with multi-threaded
+    workers (TopologyEngine, PolygonFixerWorker, NullFixerWorker) that inspect
+    vector polygon layers for topological invalidities and perform in-place
+    geometry repairs directly on the active layer within QGIS edit mode.
+
+Key Error Types Handled:
+    - Invalid Geometry / Self Intersection: Repaired via full polygon reconstruction
+      (ring extraction, unary union planarization, face matching, and hole restoration).
+    - Duplicate Vertex: Detected via QGIS's internal validator and resolved through
+      progressive coordinate tolerance sweeps and node-clustering deduplication.
+    - Null / Empty / Missing Geometry: Reconstructed from surrounding polygon
+      spatial boundaries.
+    - Ring/Structure Error: Detected when QGIS validator reports structural arrangement
+      issues (e.g. holes outside exterior ring, nested parts). These are non-auto-fixable
+      because GEOS considers them valid and makeValid() cannot alter them; they require
+      manual correction via the QGIS Vertex Tool.
+    - Duplicate Geometry & Dangles: Flagged for manual review and deduplication.
+
+Architecture:
+    - TopologyError: Defines error constants, metadata container, and bounding box logic.
+    - TopologyEngine: Executes multi-threaded validation passes across layer features.
+    - CheckerTab: Main UI containing the layer selector, error data table, canvas
+      rubber-band / marker highlights, error filter controls, and repair dispatchers.
+    - PolygonFixerWorker: Background worker executing polygon fixes with detailed
+      per-feature diagnostic reporting.
+    - NullFixerWorker: Background worker recovering missing geometries from neighbors.
+    - HelpInfoTab: Embedded rich-text documentation viewer presenting reference
+      tables, repair workflows, and operational limitations.
+"""
+
 from qgis.PyQt.QtCore import QVariant, QThread, QObject, pyqtSignal, Qt, QRect, QEvent
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -182,12 +220,26 @@ def resolve_processing_output_layer(output_value, context):
 
 
 class TopologyError:
+    """Represents a single geometry or topology defect detected on a layer feature.
+
+    Attributes:
+        error_type (str): The classification string (e.g. TopologyError.INVALID_GEOMETRY).
+        fid (int): The QGIS feature ID exhibiting the defect.
+        layer_name (str): Display name of the layer containing the feature.
+        geometry (QgsGeometry): Precise point or defect geometry (not the full feature).
+        description (str): Explanatory message detailing the specific validation issue.
+    """
     DUPLICATE_GEOMETRY = "Duplicate Geometry"
     SELF_INTERSECTION  = "Self Intersection"
     INVALID_GEOMETRY   = "Invalid Geometry"
     DANGLE             = "Dangle (Loose End)"
     WRONG_TYPE_GEOMETRY = "Wrong-type Geometry"
     DUPLICATE_VERTEX   = "Duplicate Vertex"
+    # GEOS accepts the geometry, but QGIS's internal validator objects to how
+    # its rings/parts are arranged (e.g. "ring 1 of polygon 0 not in exterior
+    # ring"). This is NOT a duplicate vertex and removing nodes cannot fix it,
+    # so it is deliberately kept out of FIXABLE_TYPES — see CheckerTab.
+    RING_STRUCTURE_ERROR = "Ring/Structure Error"
     NULL_GEOMETRY      = "Null Geometry"
 
     def __init__(self, error_type, fid, layer_name, geometry, description=""):
@@ -224,12 +276,22 @@ ERROR_TYPE_DESCRIPTIONS = {
     TopologyError.WRONG_TYPE_GEOMETRY: "The feature's geometry type does not match the layer's declared geometry type (e.g. a line or GeometryCollection stored in a polygon layer).",
     TopologyError.DUPLICATE_GEOMETRY: "This feature's geometry is an exact duplicate of another feature's.",
     TopologyError.DANGLE: "A line endpoint doesn't connect to any other line (a loose end).",
-    TopologyError.DUPLICATE_VERTEX: "GEOS considers this geometry technically valid, but QGIS's stricter "
-                                     "internal validator flagged something — commonly caused by an accidental "
-                                     "self-snap while manually editing a gap or overlap (a duplicate/near-"
-                                     "duplicate vertex or a zero-length segment). Repaired by removing the "
-                                     "duplicate/near-duplicate vertex.",
+    TopologyError.DUPLICATE_VERTEX: "The ring contains a duplicate or near-duplicate vertex (or a zero-length "
+                                     "segment) — commonly an accidental self-snap while manually editing a gap "
+                                     "or overlap. GEOS still accepts the geometry; QGIS's stricter internal "
+                                     "validator reports it. Repaired automatically by removing the extra vertex.",
+    TopologyError.RING_STRUCTURE_ERROR: "GEOS accepts this geometry, but QGIS's internal validator objects to how "
+                                     "its rings or parts are arranged — e.g. a hole (interior ring) that is not "
+                                     "fully inside its outer ring, or a part nested inside another part. There is "
+                                     "no vertex to delete and makeValid() leaves it unchanged, so this cannot be "
+                                     "repaired automatically. Open the feature with the Vertex Tool and correct "
+                                     "the ring manually.",
 }
+
+# Appended to every log line that reports a feature the repair could not fix,
+# so the operator is told what to do next instead of just that it failed.
+MANUAL_HINT = ("Check this feature manually: select it in the table above to zoom to the "
+               "error, then use the Vertex Tool to correct it.")
 
 
 def _precise_invalidity_point(geom):
@@ -279,6 +341,12 @@ def _self_intersection_point(geom):
 
 
 class TopologyEngine(QObject):
+    """Multi-threaded topology and geometry validation engine for vector layers.
+
+    Evaluates vector layers against enabled topological rules, identifying invalidities
+    using GEOS validation and QGIS's internal validator. Emits progress updates and
+    TopologyError instances as defects are discovered.
+    """
 
     progress    = pyqtSignal(int, str)
     error_found = pyqtSignal(object)
@@ -311,7 +379,13 @@ class TopologyEngine(QObject):
         if layer is None or not layer.isValid():
             return errors
 
-        features  = list(layer.getFeatures())
+        # GeometryNoCheck is set explicitly, exactly as the repair workers do.
+        # A plain getFeatures() inherits whatever invalid-geometry filtering the
+        # request defaults to, and this scan MUST see invalid features — they are
+        # the entire point of it. Never let a filter silently hide the errors the
+        # checker exists to report.
+        _req = QgsFeatureRequest().setInvalidGeometryCheck(QgsFeatureRequest.GeometryNoCheck)
+        features  = list(layer.getFeatures(_req))
         total     = len(features)
         if total == 0:
             return errors
@@ -393,10 +467,29 @@ class TopologyEngine(QObject):
                         detail = first.what()
                     except Exception:
                         detail = "flagged by QGIS's internal validator"
-                    err = TopologyError(TopologyError.DUPLICATE_VERTEX, fid,
-                                        layer_name, loc,
-                                        "Duplicate/near-duplicate vertex (e.g. from an accidental "
-                                        "self-snap): {}".format(detail))
+
+                    # validateGeometry() reports several unrelated problems, and
+                    # only one of them is actually a duplicate vertex. Classify by
+                    # what it SAID rather than labelling everything DUPLICATE_VERTEX
+                    # — the label decides which repair runs, and running the
+                    # remove-duplicate-nodes fixer on, say, a misplaced interior
+                    # ring can never succeed and leaves the row stuck forever.
+                    #   "line 1 contains 2 duplicate node(s) starting at vertex 2"
+                    #       -> a real duplicate vertex, auto-fixable
+                    #   "ring 1 of polygon 0 not in exterior ring"
+                    #   "Polygon 1 lies inside polygon 0"
+                    #       -> ring/part arrangement, NOT auto-fixable
+                    if "duplicate node" in detail.lower():
+                        err = TopologyError(TopologyError.DUPLICATE_VERTEX, fid,
+                                            layer_name, loc,
+                                            "Duplicate/near-duplicate vertex (e.g. from an accidental "
+                                            "self-snap): {}".format(detail))
+                    else:
+                        err = TopologyError(TopologyError.RING_STRUCTURE_ERROR, fid,
+                                            layer_name, loc,
+                                            "QGIS's internal validator reports: {}. This is not a duplicate "
+                                            "vertex — there is no node to delete — so it cannot be repaired "
+                                            "automatically.".format(detail))
                     errors.append(err); self.error_found.emit(err)
 
             if TopologyError.WRONG_TYPE_GEOMETRY in enabled_checks:
@@ -692,6 +785,12 @@ def _track_canvas_marker(item):
 
 
 class CheckerTab(QWidget):
+    """Primary interactive UI tab for Geometry Repair Toolkit.
+
+    Provides controls for selecting input layers, launching background topology scans,
+    displaying issues in an interactive table, highlighting errors on the QGIS map
+    canvas, and routing fixable rows to automated in-place repair workers.
+    """
 
     # Which TopologyError / issue-type strings each internal repair mechanism
     # handles. "Repair Selected Features" is the single user-facing action;
@@ -1124,18 +1223,23 @@ class CheckerTab(QWidget):
                 key = (layer.id(), "quick")
                 jobs.setdefault(key, {"layer": layer, "kind": "quick", "issues": []})["issues"].append(d)
             else:
-                skipped.append(f"FID {d['feature_id']} ({issue})")
+                reason = d.get("description") or ERROR_TYPE_DESCRIPTIONS.get(issue, "")
+                skipped.append(f"FID {d['feature_id']} ({issue}) — {reason}" if reason
+                               else f"FID {d['feature_id']} ({issue})")
 
         if not jobs:
             return QMessageBox.warning(
                 self, "No Fixable Errors",
-                "The checked rows are not handled by Repair Selected Features."
+                "None of the checked rows can be repaired automatically.\n\n"
+                "They are listed in the log with the reason for each one. "
+                "These features have to be corrected manually with the Vertex Tool."
             )
 
         if skipped:
-            self._log("Skipped rows with no automatic fix:")
+            self._log("These checked rows have NO automatic fix and need manual repair:")
             for msg in skipped[:20]: self._log("  - " + msg)
             if len(skipped) > 20: self._log(f"  ...and {len(skipped)-20} more")
+            self._log(f"  {MANUAL_HINT}")
 
         self.fix_queue = list(jobs.values())
         self.fix_total_jobs = len(self.fix_queue)
@@ -1456,7 +1560,13 @@ class CheckerTab(QWidget):
 # =============================================================================
 
 class PolygonFixerWorker(QThread):
-    """Mirrors 2_geometry_fixer.py logic."""
+    """Background worker thread performing in-place geometry repair on polygon layers.
+
+    Applies progressive tolerance sweeps for duplicate node removal, full polygon
+    reconstructions (planarization, polygonization, hole assignment), and makeValid
+    fallbacks, providing detailed per-feature diagnostic logging when errors cannot
+    be automatically repaired.
+    """
     log      = pyqtSignal(str)
     progress = pyqtSignal(int)
     finished = pyqtSignal(int, int)   # fixed, copied
@@ -1656,6 +1766,36 @@ class PolygonFixerWorker(QThread):
         except Exception:
             return None
 
+    def _why_unfixable(self, geom):
+        """Best-effort, plain-language explanation of why a feature could not be
+        repaired, so the log tells the operator what is actually wrong instead of
+        only that the attempt failed."""
+        if geom is None or geom.isNull() or geom.isEmpty():
+            return "the feature has no geometry at all"
+        try:
+            mv = geom.makeValid()
+        except Exception:
+            mv = None
+        if mv is None or mv.isEmpty():
+            return "makeValid() could not produce any geometry from it"
+        try:
+            gt = QgsWkbTypes.geometryType(mv.wkbType())
+        except Exception:
+            gt = None
+        if gt == QgsWkbTypes.LineGeometry:
+            return ("it encloses no area — the outline collapses to a line (a zero-width sliver, "
+                    "or vertices that all fall on one straight line), so there is no polygon left "
+                    "to rebuild. This feature has to be re-digitised or deleted")
+        if gt == QgsWkbTypes.PointGeometry:
+            return "it collapses to a single point — the outline has no extent"
+        try:
+            errs = geom.validateGeometry()
+            if errs:
+                return errs[0].what()
+        except Exception:
+            pass
+        return "the rebuilt geometry still did not pass the polygon validity check"
+
     def _make_selected_input_layer(self, source_layer, selected_ids):
         """Create a temporary in-memory polygon layer from the chosen FIDs.
 
@@ -1723,42 +1863,54 @@ class PolygonFixerWorker(QThread):
         self.log.emit("Selected feature ID(s): " + ", ".join(str(fid) for fid in sel_ids))
         self.log.emit("Preparing selected feature boundaries…"); self.progress.emit(5)
 
+        # Set up BEFORE the candidate-building steps below. Those steps used to
+        # bail out with finished(0, 0) whenever they produced nothing, which
+        # returned before this point — so repaired_geometries was never even
+        # created, every per-feature fallback below was skipped, and the operator
+        # got a single opaque line ("No repair candidate was created.") with no
+        # indication of which features were involved or why. The candidate faces
+        # are an optimisation, not a prerequisite: the loop below already handles
+        # an empty candidate set and repairs each feature on its own.
+        self.output_layer = layer
+        self.repaired_geometries = {}
+
+        p_feats = []; p_idx = QgsSpatialIndex(); p_lookup = {}
+        ll = None; pl = None
+
         try:
             lr = processing.run("native:polygonstolines", {"INPUT":src,"OUTPUT":"TEMPORARY_OUTPUT"},
                                 context=ctx, feedback=fb, is_child_algorithm=False)
             ll = resolve_processing_output_layer(lr["OUTPUT"], ctx)
         except Exception as e:
-            self.log.emit(f"Preparing selected feature boundaries failed: {e}"); self.finished.emit(0, 0); return
+            self.log.emit(f"Preparing selected feature boundaries failed: {e}")
 
         if ll is None or ll.featureCount() == 0:
-            self.log.emit("No repair boundary was created."); self.finished.emit(0, 0); return
+            self.log.emit("No repair boundary could be built from the selected feature(s).")
+        else:
+            self.log.emit("Building repair candidates…"); self.progress.emit(25)
+            try:
+                pr = processing.run("native:polygonize", {"INPUT":ll,"KEEP_FIELDS":False,"OUTPUT":"TEMPORARY_OUTPUT"},
+                                    context=ctx, feedback=fb, is_child_algorithm=False)
+                pl = resolve_processing_output_layer(pr["OUTPUT"], ctx)
+            except Exception as e:
+                self.log.emit(f"Building repair candidates failed: {e}")
 
-        self.log.emit("Building repair candidates…"); self.progress.emit(25)
-        try:
-            pr = processing.run("native:polygonize", {"INPUT":ll,"KEEP_FIELDS":False,"OUTPUT":"TEMPORARY_OUTPUT"},
-                                context=ctx, feedback=fb, is_child_algorithm=False)
-            pl = resolve_processing_output_layer(pr["OUTPUT"], ctx)
-        except Exception as e:
-            self.log.emit(f"Building repair candidates failed: {e}"); self.finished.emit(0, 0); return
-
-        if pl is None or pl.featureCount() == 0:
-            self.log.emit("No repair candidate was created."); self.finished.emit(0, 0); return
-
-        self.log.emit(f"Repair candidates created: {pl.featureCount()}")
-        self.log.emit("Analyzing repair candidates…"); self.progress.emit(45)
-
-        p_feats = []; p_idx = QgsSpatialIndex()
-        for pf in pl.getFeatures():
-            cg = self._clean(pf.geometry())
-            if cg is None or cg.isEmpty(): continue
-            pf.setGeometry(cg); p_feats.append(pf); p_idx.addFeature(pf)
-        p_lookup = {f.id(): f for f in p_feats}
+            if pl is None or pl.featureCount() == 0:
+                self.log.emit("No repair candidate was created from those boundaries.")
+            else:
+                self.log.emit(f"Repair candidates created: {pl.featureCount()}")
+                self.log.emit("Analyzing repair candidates…"); self.progress.emit(45)
+                for pf in pl.getFeatures():
+                    cg = self._clean(pf.geometry())
+                    if cg is None or cg.isEmpty(): continue
+                    pf.setGeometry(cg); p_feats.append(pf); p_idx.addFeature(pf)
+                p_lookup = {f.id(): f for f in p_feats}
+                if not p_feats:
+                    self.log.emit("None of the repair candidates produced a usable polygon.")
 
         if not p_feats:
-            self.log.emit("No valid polygonized geometry."); self.finished.emit(0, 0); return
-
-        self.output_layer = layer
-        self.repaired_geometries = {}
+            self.log.emit("Continuing without repair candidates — each selected feature will be "
+                          "examined individually and reported on below.")
 
         self.log.emit("Calculating repaired geometries…"); self.progress.emit(60)
 
@@ -1773,7 +1925,7 @@ class PolygonFixerWorker(QThread):
 
             if orig is not None and not orig.isEmpty() and orig.isGeosValid() and orig.isSimple():
                 deduped = None
-                had_dupes = False
+                had_dupes = False        # True only if removeDuplicateNodes() actually removed something
 
                 try:
                     bb = orig.boundingBox()
@@ -1813,17 +1965,59 @@ class PolygonFixerWorker(QThread):
                         mv = mv_src.makeValid()
                         if mv and not mv.isEmpty() and not mv.validateGeometry():
                             deduped = mv
-                            had_dupes = True
+                            # NOTE: deliberately does NOT set had_dupes. This path
+                            # removed no vertices, and claiming otherwise is what made
+                            # the log report "repaired by removing duplicate vertex(es)"
+                            # for features that were already clean.
                     except Exception:
                         pass
 
-                if had_dupes and deduped is not None and not deduped.isEmpty():
-                    new_geom = deduped
+                # A repair only counts if the geometry actually changed. Without this
+                # guard the makeValid() fallback above reported every already-clean
+                # feature as repaired — inflating "Fixed: n" and marking the layer
+                # modified for nothing (re-running Repair without re-scanning did
+                # exactly that, reporting Fixed: 3 on features fixed in the first pass).
+                # NOTE: equals() alone is the wrong test here — it compares shape,
+                # and deleting a duplicate vertex does not change the shape, so a
+                # genuine dedup would look like a no-op. Treat it as unchanged only
+                # when the shape AND the vertex count both match.
+                candidate_geom = deduped if (deduped is not None and not deduped.isEmpty()) else None
+                if candidate_geom is not None:
+                    try:
+                        same_shape = orig.equals(candidate_geom)
+                        same_verts = (sum(1 for _ in orig.vertices())
+                                      == sum(1 for _ in candidate_geom.vertices()))
+                        if same_shape and same_verts:
+                            candidate_geom = None
+                    except Exception:
+                        pass
+
+                if candidate_geom is not None:
+                    new_geom = candidate_geom
                     fixed += 1
-                    self.log.emit(f"   FID {feat.id()} repaired by removing duplicate/near-duplicate vertex(es).")
+                    if had_dupes:
+                        self.log.emit(f"   FID {feat.id()} repaired by removing duplicate/near-duplicate vertex(es).")
+                    else:
+                        self.log.emit(f"   FID {feat.id()} repaired by makeValid() — no duplicate vertex was present.")
                 else:
-                    copied += 1
-                    self.log.emit(f"   FID {feat.id()} was already valid with no duplicate vertices found — left unchanged.")
+                    try:
+                        v_errs = orig.validateGeometry()
+                    except Exception:
+                        v_errs = []
+                    if not v_errs:
+                        # Nothing is wrong with it any more — typically Repair was run
+                        # a second time without re-running Check, so the table still
+                        # lists rows that have already been fixed. Not a failure, and
+                        # not something to send the operator off to fix by hand.
+                        self.log.emit(f"   FID {feat.id()} is already valid — nothing to repair. "
+                                      f"(Re-run Check Selected Layers to refresh the error list.)")
+                    else:
+                        copied += 1
+                        self.log.emit(
+                            f"   FID {feat.id()} could NOT be repaired automatically. "
+                            f"Reason: {v_errs[0].what()}. There is no duplicate node to delete, and "
+                            f"makeValid() leaves the geometry unchanged because GEOS already considers "
+                            f"it valid. {MANUAL_HINT}")
 
                 if new_geom is not None:
                     self.repaired_geometries[feat.id()] = new_geom
@@ -1847,7 +2041,8 @@ class PolygonFixerWorker(QThread):
                         self.log.emit(f"   FID {feat.id()} repaired using raw makeValid() last-resort fallback.")
                     else:
                         copied += 1
-                        self.log.emit(f"   FID {feat.id()} couldn't be cleaned — left unchanged.")
+                        self.log.emit(f"   FID {feat.id()} could NOT be repaired automatically. "
+                                      f"Reason: {self._why_unfixable(orig)}. {MANUAL_HINT}")
             else:
                 cands = []
                 for cid in p_idx.intersects(co.boundingBox()):
@@ -1893,6 +2088,11 @@ class PolygonFixerWorker(QThread):
                                     self.log.emit(f"   FID {feat.id()} repaired using raw makeValid() last-resort fallback.")
                                 else:
                                     copied += 1
+                                    # This was the only silent failure in the loop —
+                                    # it produced "Fixed: 0  Left unchanged: n" with no
+                                    # per-feature line, leaving nothing to diagnose.
+                                    self.log.emit(f"   FID {feat.id()} could NOT be repaired automatically. "
+                                                  f"Reason: {self._why_unfixable(orig)}. {MANUAL_HINT}")
                 else:
                     fallback = self._finalize_fixed_geom(co, layer.wkbType())
                     if fallback and not fallback.isEmpty():
@@ -1910,7 +2110,8 @@ class PolygonFixerWorker(QThread):
                                 self.log.emit(f"   FID {feat.id()} repaired using raw makeValid() last-resort fallback.")
                             else:
                                 copied += 1
-                                self.log.emit(f"   FID {feat.id()} no polygonized match — left unchanged.")
+                                self.log.emit(f"   FID {feat.id()} could NOT be repaired automatically. "
+                                              f"Reason: {self._why_unfixable(orig)}. {MANUAL_HINT}")
 
             if new_geom is not None:
                 try:
@@ -1931,13 +2132,18 @@ class PolygonFixerWorker(QThread):
                 self.touched_fids.add(feat.id())
 
         self.progress.emit(100)
-        self.log.emit(f"\nFinished. Fixed: {fixed}   Left unchanged: {copied}   "
-                      f"(unsaved — edit {layer.name()} to keep, or Cancel Edits to discard)")
+        self.log.emit(f"\nFinished. Fixed: {fixed}   Needs manual repair: {copied}")
+        if copied:
+            self.log.emit(f"   {copied} feature(s) could not be repaired automatically — see the "
+                          f"'could NOT be repaired' line(s) above for the reason on each one.")
+        if fixed:
+            self.log.emit(f"   The {fixed} repaired feature(s) are UNSAVED. Use Layer > Save Layer Edits "
+                          f"on '{layer.name()}' to keep them — Cancel Edits will discard every repair.")
         self.finished.emit(fixed, copied)
 
 
 class NullFixerWorker(QThread):
-    """Mirrors 3_null_and_missing_fixer.py logic."""
+    """Background worker thread recovering missing or null geometries from surrounding polygons."""
     log      = pyqtSignal(str)
     progress = pyqtSignal(int)
     finished = pyqtSignal(int, int, int)   # recovered, copied, manual
@@ -2285,6 +2491,7 @@ class GeometryFixerTab(QWidget):
 # =============================================================================
 
 class HelpInfoTab(QWidget):
+    """Embedded HTML documentation and reference guide tab for Geometry Repair Toolkit."""
     def __init__(self):
         super().__init__()
         self._build()
@@ -2392,8 +2599,13 @@ class HelpInfoTab(QWidget):
               </tr>
               <tr style="background-color: #f9fafb;">
                 <td style="border: 1px solid #e5e7eb; padding: 6px 10px; font-weight: bold;">Duplicate Vertex</td>
-                <td style="border: 1px solid #e5e7eb; padding: 6px 10px;">Commonly an accidental self-snap made while manually digitizing a polygon (a duplicate/near-duplicate vertex or zero-length segment).</td>
+                <td style="border: 1px solid #e5e7eb; padding: 6px 10px;">Commonly an accidental self-snap made while manually digitizing a polygon (a duplicate/near-duplicate vertex or zero-length segment). Reported only when QGIS's validator actually names a duplicate node.</td>
                 <td style="border: 1px solid #e5e7eb; padding: 6px 10px;">Direct duplicate vertex removal via progressive tolerance sweep.</td>
+              </tr>
+              <tr>
+                <td style="border: 1px solid #e5e7eb; padding: 6px 10px; font-weight: bold;">Ring/Structure Error</td>
+                <td style="border: 1px solid #e5e7eb; padding: 6px 10px;">GEOS accepts the geometry, but QGIS's internal validator objects to how its rings or parts are arranged &mdash; e.g. a hole (interior ring) that is not fully inside its outer ring, or a part nested inside another part.</td>
+                <td style="border: 1px solid #e5e7eb; padding: 6px 10px; color: #b45309;"><b>No automatic repair.</b> There is no vertex to delete and makeValid() leaves it unchanged. Correct the ring manually with the Vertex Tool.</td>
               </tr>
             </tbody>
           </table>
@@ -2409,7 +2621,15 @@ class HelpInfoTab(QWidget):
             <li style="margin-bottom: 4px;"><b>Invalid Geometry / Wrong-type Geometry / Self Intersection:</b> Thorough polygon reconstruction (ring decomposition, unary union planarization, face matching, and hole restoration).</li>
             <li style="margin-bottom: 4px;"><b>Duplicate Vertex:</b> Removes duplicate and near-duplicate vertices directly via progressive tolerance sweep ($10^{-12}$ to $10^{-6}$ bbox scale) and node-clustering deduplication.</li>
             <li style="margin-bottom: 4px;"><b>Null / Empty / Missing Geometry:</b> Recovers missing geometry from surrounding polygon spatial boundary context.</li>
+            <li style="margin-bottom: 4px;"><b>Ring/Structure Error:</b> <span style="color: #b45309;">Not repaired automatically.</span> These rows stay greyed out with the checkbox disabled, because no automatic mechanism can fix them &mdash; they must be corrected by hand.</li>
           </ul>
+          <p style="margin: 0 0 12px 0;">
+            <b>When a feature cannot be repaired:</b> the log names the feature and states the reason &mdash; for example
+            <i>"FID 12 could NOT be repaired automatically. Reason: it encloses no area &mdash; the outline collapses to a line&hellip;"</i>
+            &mdash; followed by a prompt to check it manually. The run summary reports these as
+            <b>Needs manual repair</b>, separately from the features it fixed. A feature that reports
+            <i>"encloses no area"</i> has to be re-digitised or deleted; nothing can rebuild a polygon that has none.
+          </p>
           <p style="margin: 0 0 10px 0;">
             <b>Multipart Resolution & Sliver Cleanup:</b> Polygon reconstruction can occasionally produce multiple parts when resolving a self-intersecting bowtie shape. The toolkit automatically drops negligible artifact slivers (< 0.1% area ratio) and keeps the union of real parts. Pre-existing legitimate multipart features that were not repaired are left completely untouched.
           </p>

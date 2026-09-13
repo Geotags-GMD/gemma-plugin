@@ -143,6 +143,7 @@ def sync_skill_docs():
         "test_gsheet": "Google Sheets integration",
         "test_join_barangay_attributes": "Barangay attribute joining",
         "test_lgu_fix_processing": "LGU fix processing",
+        "test_mbi_run_analysis": "Run Analysis MBI reference cases engine",
         "test_mbi_validator": "MBI validation engine",
         "test_package_qfield": "QField packaging",
         "test_pre_ea_processor": "Pre-EA processor",
