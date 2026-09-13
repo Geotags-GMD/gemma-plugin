@@ -1,6 +1,41 @@
 {
   "releases": [
     {
+      "version": "1.0.4",
+      "date": "2026-09-13",
+      "tag": "v1.0.4",
+      "prerelease": false,
+      "contributors": [
+        "pacoleslaw",
+        "nbacquiano-ui",
+        "psacjperez"
+      ],
+      "downloadUrl": "https://github.com/GMD-Repository/gemma-plugin/releases/download/v1.0.4/gemma-plugin-v1.0.4.zip",
+      "releaseUrl": "https://github.com/GMD-Repository/gemma-plugin/releases/tag/v1.0.4",
+      "qgisVersions": [
+        "3.34",
+        "3.40",
+        "3.44"
+      ],
+      "changes": {
+        "features": [
+          "Implemented EA delineation and merging workflow with an interactive split dialog ([@pacoleslaw](https://github.com/pacoleslaw)) ([#220](https://github.com/GMD-Repository/gemma-plugin/pull/220))"
+        ],
+        "improvements": [
+          "Refined unassigned layer filtering and resolved unzipped libqfieldsync paths ([@nbacquiano-ui](https://github.com/nbacquiano-ui)) ([#213](https://github.com/GMD-Repository/gemma-plugin/pull/213))",
+          "Standardized unassigned layer filtering to geocode and ea_geocode ([@nbacquiano-ui](https://github.com/nbacquiano-ui)) ([#230](https://github.com/GMD-Repository/gemma-plugin/pull/230))",
+          "Streamlined projection finder UI and improved edit session handling ([@psacjperez](https://github.com/psacjperez)) ([#249](https://github.com/GMD-Repository/gemma-plugin/pull/249))"
+        ],
+        "changes": [],
+        "fixes": [
+          "Removed merge candidates output layer and pruned candidate sinks ([@pacoleslaw](https://github.com/pacoleslaw)) ([#242](https://github.com/GMD-Repository/gemma-plugin/pull/242))"
+        ],
+        "breaking": [],
+        "deprecated": [],
+        "dependencies": []
+      }
+    },
+    {
       "version": "1.0.3",
       "date": "2026-09-03",
       "tag": "v1.0.3",
@@ -108,5 +143,5 @@
       }
     }
   ],
-  "latest": "1.0.3"
+  "latest": "1.0.4"
 }

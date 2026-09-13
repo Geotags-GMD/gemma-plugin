@@ -67,7 +67,7 @@ export default defineConfig({
         ]
       },
       {
-        text: 'v1.0.3',
+        text: 'v1.0.4',
         items: [
           { text: 'Changelog', link: '/changelog' },
           { text: 'Download Latest', link: 'https://github.com/GMD-Repository/gemma-plugin/releases/latest' },

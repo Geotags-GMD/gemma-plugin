@@ -2,6 +2,26 @@
 
 Changelogs of all GEMMA Plugin stable releases, which are also available [on GitHub](https://github.com/GMD-Repository/gemma-plugin/releases).
 
+## 1.0.4
+<time>Sep 13, 2026</time>
+
+### ✨ New Features
+- Implemented EA delineation and merging workflow with an interactive split dialog ([@pacoleslaw](https://github.com/pacoleslaw)) ([#220](https://github.com/GMD-Repository/gemma-plugin/pull/220))
+
+### ⚡ Improvements & Fixes
+- Refined unassigned layer filtering and resolved unzipped libqfieldsync paths ([@nbacquiano-ui](https://github.com/nbacquiano-ui)) ([#213](https://github.com/GMD-Repository/gemma-plugin/pull/213))
+- Standardized unassigned layer filtering to geocode and ea_geocode ([@nbacquiano-ui](https://github.com/nbacquiano-ui)) ([#230](https://github.com/GMD-Repository/gemma-plugin/pull/230))
+- Streamlined projection finder UI and improved edit session handling ([@psacjperez](https://github.com/psacjperez)) ([#249](https://github.com/GMD-Repository/gemma-plugin/pull/249))
+
+### 🐛 Bug Fixes
+- Removed merge candidates output layer and pruned candidate sinks ([@pacoleslaw](https://github.com/pacoleslaw)) ([#242](https://github.com/GMD-Repository/gemma-plugin/pull/242))
+
+### 📚 Documentation
+- Integrated reference MBI cases and updated documentation ([@psacjperez](https://github.com/psacjperez)) ([#214](https://github.com/GMD-Repository/gemma-plugin/pull/214))
+- Updated Geometry Repair Toolkit user guide and enhanced topology diagnostic documentation ([@psacjperez](https://github.com/psacjperez)) ([#221](https://github.com/GMD-Repository/gemma-plugin/pull/221))
+
+<Contributors :contributors="['pacoleslaw', 'nbacquiano-ui', 'psacjperez']" />
+
 ## 1.0.3
 <time>Sep 03, 2026</time>
 

@@ -1,19 +1,19 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <?xml-stylesheet type="text/xsl" href=""?>
 <plugins>
-  <pyqgis_plugin name="GEMMA" version="1.0.3">
-    <version>1.0.3</version>
+  <pyqgis_plugin name="GEMMA" version="1.0.4">
+    <version>1.0.4</version>
     <description>GIS Extension for Map Management and Analysis</description>
     <about>This plugin is developed by the Geospatial Management Division to provide a comprehenive set of tools that could be used for map management and analyses for different sorts of activities.</about>
     <author>Geospatial Management Division</author>
     <author_name>Geospatial Management Division</author_name>
     <qgis_minimum_version>3.0</qgis_minimum_version>
     <homepage>https://gemma-plugin.vercel.app/</homepage>
-    <download_url>https://github.com/GMD-Repository/gemma-plugin/releases/download/v1.0.3/gemma-plugin-v1.0.3.zip</download_url>
+    <download_url>https://github.com/GMD-Repository/gemma-plugin/releases/download/v1.0.4/gemma-plugin-v1.0.4.zip</download_url>
     <icon>https://gemma-plugin.vercel.app/icons/icon.png</icon>
     <file_name>gemma-plugin.zip</file_name>
-    <upload_date>2026-09-03</upload_date>
-    <update_date>2026-09-03</update_date>
+    <upload_date>2026-09-13</upload_date>
+    <update_date>2026-09-13</update_date>
     <experimental>False</experimental>
     <deprecated>False</deprecated>
     <tracker>https://github.com/GMD-Repository/gemma-plugin/issues</tracker>
