@@ -75,7 +75,7 @@ def set_github_output(key: str, value: str) -> None:
     """
     output_file = os.environ.get("GITHUB_OUTPUT")
     if not output_file:
-        logger.warning("GITHUB_OUTPUT not set — skipping output: %s=%s", key, value)
+        logger.warning("GITHUB_OUTPUT not set — skipping output: %s=<redacted %d chars>", key, len(value))
         return
 
     with open(output_file, "a", encoding="utf-8") as f:
