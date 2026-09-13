@@ -171,6 +171,17 @@ def main() -> None:
     if args.fetch_emails:
         emails = fetch_emails(client, spreadsheet_id, worksheet_name=args.worksheet_emails)
         recipients_str = ",".join(emails)
+
+        # Mask each email in GitHub Actions logs to prevent PII leakage.
+        # Dynamic step outputs are NOT auto-masked by GitHub (only secrets are).
+        # The dawidd6/action-send-mail action logs its inputs, which would
+        # otherwise expose all recipient addresses in plaintext.
+        if os.environ.get("GITHUB_ACTIONS"):
+            for email in emails:
+                print(f"::add-mask::{email}")
+            if recipients_str:
+                print(f"::add-mask::{recipients_str}")
+
         set_github_output("recipients", recipients_str)
 
     if args.log_release:
